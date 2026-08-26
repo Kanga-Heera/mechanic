@@ -1,0 +1,11 @@
+title: Unquoted Leading Asterisk
+id: 22222222-2222-2222-2222-222222222222
+status: test
+logsource:
+    category: process_creation
+detection:
+    selection:
+        CommandLine:
+            - *cmd /c echo hi
+    condition: selection
+level: medium

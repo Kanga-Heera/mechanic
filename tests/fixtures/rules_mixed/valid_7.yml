@@ -1,0 +1,10 @@
+title: Valid Rule 7
+id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa07
+status: test
+logsource:
+    category: process_creation
+detection:
+    selection:
+        Image|endswith: '\notepad7.exe'
+    condition: selection
+level: medium

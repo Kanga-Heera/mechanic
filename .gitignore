@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# git-mining cache written by churn.mine_commits_cached() into whatever
+# repo `mechanic` is pointed at - never relevant inside this repo itself
+.mechanic_cache/
+
+# generated PDF exports of the .md docs (see make_pdf*.py) - regenerable,
+# not source
+*.pdf
+
+# stray empty debug file found during repo init, not needed
+_probe_check.txt

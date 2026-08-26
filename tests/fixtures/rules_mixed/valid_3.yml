@@ -1,0 +1,10 @@
+title: Valid Rule 3
+id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa03
+status: test
+logsource:
+    category: process_creation
+detection:
+    selection:
+        Image|endswith: '\notepad3.exe'
+    condition: selection
+level: medium

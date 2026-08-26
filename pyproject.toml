@@ -1,0 +1,29 @@
+[project]
+name = "mechanic"
+version = "0.1.0"
+description = "Detection-rule maintenance triage: fault-isolated Sigma/Elastic/Splunk loading, git-driven behavioral staleness, an STP-validated structural fragility classifier, and an explainable review-priority triage on top."
+requires-python = ">=3.10"
+dependencies = [
+    "pydriller>=2.6",
+    "pysigma>=1.5.0",
+    "click>=8.1",
+    "rich>=13.0",
+    "rich-click>=1.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+mechanic = "mechanic.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mechanic*"]
+
+[tool.setuptools.package-data]
+mechanic = ["data/*.json", "data/*.md"]

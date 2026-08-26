@@ -1,0 +1,10 @@
+title: Valid Rule 5
+id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa05
+status: test
+logsource:
+    category: process_creation
+detection:
+    selection:
+        Image|endswith: '\notepad5.exe'
+    condition: selection
+level: medium

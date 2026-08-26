@@ -1,0 +1,10 @@
+title: Bare Integer Id
+id: 200008
+status: test
+logsource:
+    category: process_creation
+detection:
+    selection:
+        Image|endswith: '\cmd.exe'
+    condition: selection
+level: medium

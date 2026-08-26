@@ -1,0 +1,10 @@
+title: Valid Rule 2
+id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa02
+status: test
+logsource:
+    category: process_creation
+detection:
+    selection:
+        Image|endswith: '\notepad2.exe'
+    condition: selection
+level: medium

@@ -1,0 +1,91 @@
+repo,index,rule_path,rule_name,llm_tier,automated_tier,agree,direction
+elastic,1,thirdparty/elastic-detection-rules/rules\promotions\endgame_malware_detected.toml,Malware - Detected - Elastic Endgame,Artifact,Artifact,True,agree
+elastic,2,thirdparty/elastic-detection-rules/rules\integrations\aws\impact_kms_imported_key_material_deleted.toml,AWS KMS Imported Key Material Deleted,TTP,TTP,True,agree
+elastic,3,thirdparty/elastic-detection-rules/rules\cross-platform\discovery_virtual_machine_fingerprinting_grep.toml,Virtual Machine Fingerprinting via Grep,Tool,Artifact,False,auto_under_scores
+elastic,4,thirdparty/elastic-detection-rules/rules\windows\defense_evasion_obf_args_unicode_modified_letters.toml,Command Obfuscation via Unicode Modifier Letters,Tool,Tool,True,agree
+elastic,5,thirdparty/elastic-detection-rules/rules\integrations\gcp\impact_gcp_gke_coredns_or_kube_dns_configuration_modified.toml,GKE CoreDNS or Kube-DNS Configuration Modified,TTP,TTP,True,agree
+elastic,6,thirdparty/elastic-detection-rules/rules\integrations\cloud_defend\persistence_modification_of_persistence_relevant_files.toml,Modification of Persistence Relevant Files Detected via Defend for Containers,TTP,Artifact,False,auto_under_scores
+elastic,7,thirdparty/elastic-detection-rules/rules\integrations\azure\resource_development_entra_id_custom_domain_added_and_verified.toml,Entra ID Custom Domain Added or Verified,TTP,TTP,True,agree
+elastic,8,thirdparty/elastic-detection-rules/rules\integrations\aws\persistence_rds_instance_made_public.toml,AWS RDS DB Instance Made Public,TTP,TTP,True,agree
+elastic,9,thirdparty/elastic-detection-rules/rules\windows\defense_evasion_modify_ownership_os_files.toml,System File Ownership Change,Tool,Tool,True,agree
+elastic,10,thirdparty/elastic-detection-rules/rules\integrations\aws\exfiltration_sns_rare_protocol_subscription_by_user.toml,AWS SNS Rare Protocol Subscription by User,TTP,TTP,True,agree
+elastic,11,thirdparty/elastic-detection-rules/rules\windows\credential_access_cmdline_dump_tool.toml,Potential Credential Access via Windows Utilities,Tool,Tool,True,agree
+elastic,12,thirdparty/elastic-detection-rules/rules\windows\defense_evasion_network_connection_from_windows_binary.toml,Unusual Network Activity from a Windows System Binary,Tool,Tool,True,agree
+elastic,13,thirdparty/elastic-detection-rules/rules\linux\privilege_escalation_gdb_sys_ptrace_netcon.toml,Root Network Connection via GDB CAP_SYS_PTRACE,Tool,Artifact,False,auto_under_scores
+elastic,14,thirdparty/elastic-detection-rules/rules\integrations\aws\discovery_new_terms_sts_getcalleridentity_ec2_role_new_source_as.toml,AWS EC2 Role GetCallerIdentity from New Source AS Organization,TTP,TTP,True,agree
+elastic,15,thirdparty/elastic-detection-rules/rules\macos\lateral_movement_mounting_smb_share.toml,Attempt to Mount SMB Share via Command Line,Tool,Artifact,False,auto_under_scores
+elastic,16,thirdparty/elastic-detection-rules/rules\linux\defense_evasion_hex_payload_execution_via_commandline.toml,Potential Hex Payload Execution via Command-Line,Artifact,Artifact,True,agree
+elastic,17,thirdparty/elastic-detection-rules/rules\cross-platform\execution_nodejs_pre_or_post_install_script_execution.toml,Node.js Pre or Post-Install Script Execution,Tool,Artifact,False,auto_under_scores
+elastic,18,thirdparty/elastic-detection-rules/rules\cross-platform\execution_d4c_k8s_mda_kubernetes_api_activity_by_unusual_utilities.toml,Direct Interactive Kubernetes API Request by Unusual Utilities,TTP,TTP,True,agree
+elastic,19,thirdparty/elastic-detection-rules/rules\integrations\aws\execution_lambda_layer_shared_externally.toml,AWS Lambda Layer Shared Externally,TTP,TTP,True,agree
+elastic,20,thirdparty/elastic-detection-rules/rules\integrations\azure\persistence_entra_id_user_added_as_owner_for_azure_application.toml,Entra ID User Added as Registered Application Owner,TTP,TTP,True,agree
+elastic,21,thirdparty/elastic-detection-rules/rules\integrations\cloud_defend\defense_evasion_potential_evasion_via_encoded_payload.toml,Encoded Payload Detected via Defend for Containers,Tool,Artifact,False,auto_under_scores
+elastic,22,thirdparty/elastic-detection-rules/rules\linux\persistence_kernel_driver_load.toml,Kernel Driver Load,TTP,Artifact,False,auto_under_scores
+elastic,23,thirdparty/elastic-detection-rules/rules\macos\persistence_manual_chromium_extension_loading.toml,Manual Loading of a Suspicious Chromium Extension,Tool,Artifact,False,auto_under_scores
+elastic,24,thirdparty/elastic-detection-rules/rules\cross-platform\execution_aws_ec2_lolbin_via_ssm.toml,AWS EC2 LOLBin Execution via SSM SendCommand,TTP,TTP,True,agree
+elastic,25,thirdparty/elastic-detection-rules/rules\linux\privilege_escalation_unshare_namespace_manipulation.toml,Namespace Manipulation Using Unshare,Tool,Tool,True,agree
+elastic,26,thirdparty/elastic-detection-rules/rules\integrations\azure\initial_access_entra_id_protection_confirmed_compromise.toml,Entra ID Protection Admin Confirmed Compromise,TTP,Artifact,False,auto_under_scores
+elastic,27,thirdparty/elastic-detection-rules/rules\windows\defense_evasion_disable_nla.toml,Network-Level Authentication (NLA) Disabled,TTP,Tool,False,auto_under_scores
+elastic,28,thirdparty/elastic-detection-rules/rules\threat_intel\threat_intel_indicator_match_address.toml,Threat Intel IP Address Indicator Match,IOC,Artifact,False,auto_over_scores
+elastic,29,thirdparty/elastic-detection-rules/rules\windows\credential_access_spn_attribute_modified.toml,User account exposed to Kerberoasting,TTP,Artifact,False,auto_under_scores
+elastic,30,thirdparty/elastic-detection-rules/rules\linux\defense_evasion_dynamic_linker_file_creation.toml,Dynamic Linker Creation,TTP,Artifact,False,auto_under_scores
+splunk,1,thirdparty/splunk-security-content/detections\cloud\risk_rule_for_dev_sec_ops_by_repository.yml,Risk Rule for Dev Sec Ops by Repository,Artifact,Artifact,True,agree
+splunk,2,thirdparty/splunk-security-content/detections\application\okta_new_api_token_created.yml,Okta New API Token Created,TTP,Artifact,False,auto_under_scores
+splunk,3,thirdparty/splunk-security-content/detections\endpoint\suspicious_plistbuddy_usage.yml,Suspicious PlistBuddy Usage,Tool,Artifact,False,auto_under_scores
+splunk,4,thirdparty/splunk-security-content/detections\endpoint\powershell_invoke_wmiexec_usage.yml,PowerShell Invoke WmiExec Usage,Tool,Tool,True,agree
+splunk,5,thirdparty/splunk-security-content/detections\endpoint\linux_system_reboot_via_system_request_key.yml,Linux System Reboot Via System Request Key,TTP,Artifact,False,auto_under_scores
+splunk,6,thirdparty/splunk-security-content/detections\endpoint\detect_rare_executables.yml,Detect Rare Executables,TTP,Artifact,False,auto_under_scores
+splunk,7,thirdparty/splunk-security-content/detections\cloud\o365_mailbox_folder_read_permission_assigned.yml,O365 Mailbox Folder Read Permission Assigned,TTP,TTP,True,agree
+splunk,8,thirdparty/splunk-security-content/detections\cloud\kubernetes_node_port_creation.yml,Kubernetes Node Port Creation,TTP,Artifact,False,auto_under_scores
+splunk,9,thirdparty/splunk-security-content/detections\endpoint\windows_rdp_connection_successful.yml,Windows RDP Connection Successful,Artifact,Artifact,True,agree
+splunk,10,thirdparty/splunk-security-content/detections\application\splunk_secure_application_alerts_for_runtime_security.yml,Splunk Secure Application Alerts for Runtime Security,Artifact,Artifact,True,agree
+splunk,11,thirdparty/splunk-security-content/detections\application\pingid_new_mfa_method_after_credential_reset.yml,PingID New MFA Method After Credential Reset,TTP,Artifact,False,auto_under_scores
+splunk,12,thirdparty/splunk-security-content/detections\cloud\o365_block_user_consent_for_risky_apps_disabled.yml,O365 Block User Consent For Risky Apps Disabled,TTP,TTP,True,agree
+splunk,13,thirdparty/splunk-security-content/detections\endpoint\linux_shell_pseudo_device_reverse_shell.yml,Linux Shell Pseudo Device Reverse Shell,Tool,Artifact,False,auto_under_scores
+splunk,14,thirdparty/splunk-security-content/detections\endpoint\modification_of_wallpaper.yml,Modification Of Wallpaper,Artifact,Tool,False,auto_over_scores
+splunk,15,thirdparty/splunk-security-content/detections\web\connectwise_screenconnect_authentication_bypass.yml,ConnectWise ScreenConnect Authentication Bypass,Artifact,Artifact,True,agree
+splunk,16,thirdparty/splunk-security-content/detections\application\okta_suspicious_use_of_a_session_cookie.yml,Okta Suspicious Use of a Session Cookie,TTP,Artifact,False,auto_under_scores
+splunk,17,thirdparty/splunk-security-content/detections\endpoint\linux_decode_base64_to_shell.yml,Linux Decode Base64 to Shell,Tool,Artifact,False,auto_under_scores
+splunk,18,thirdparty/splunk-security-content/detections\endpoint\windows_query_registry_uninstall_program_list.yml,Windows Query Registry UnInstall Program List,Artifact,Artifact,True,agree
+splunk,19,thirdparty/splunk-security-content/detections\endpoint\linux_sudo_or_su_execution.yml,Linux Sudo OR Su Execution,Tool,Artifact,False,auto_under_scores
+splunk,20,thirdparty/splunk-security-content/detections\endpoint\windows_steal_authentication_certificates_export_certificate.yml,Windows Steal Authentication Certificates Export Certificate,Tool,Tool,True,agree
+splunk,21,thirdparty/splunk-security-content/detections\endpoint\suspicious_wav_file_in_appdata_folder.yml,Suspicious WAV file in Appdata Folder,Artifact,Artifact,True,agree
+splunk,22,thirdparty/splunk-security-content/detections\application\cisco_duo_policy_allow_devices_without_screen_lock.yml,Cisco Duo Policy Allow Devices Without Screen Lock,Artifact,Artifact,True,agree
+splunk,23,thirdparty/splunk-security-content/detections\endpoint\excessive_usage_of_cacls_app.yml,Excessive Usage Of Cacls App,Tool,Tool,True,agree
+splunk,24,thirdparty/splunk-security-content/detections\endpoint\windows_rdp_server_registry_deletion.yml,Windows RDP Server Registry Deletion,TTP,Artifact,False,auto_under_scores
+splunk,25,thirdparty/splunk-security-content/detections\endpoint\windows_eventlog_recon_activity_using_log_query_utilities.yml,Windows EventLog Recon Activity Using Log Query Utilities,Tool,Tool,True,agree
+splunk,26,thirdparty/splunk-security-content/detections\endpoint\suspicious_ticket_granting_ticket_request.yml,Suspicious Ticket Granting Ticket Request,TTP,Artifact,False,auto_under_scores
+splunk,27,thirdparty/splunk-security-content/detections\endpoint\drop_icedid_license_dat.yml,Drop IcedID License dat,Artifact,Artifact,True,agree
+splunk,28,thirdparty/splunk-security-content/detections\endpoint\linux_possible_ssh_key_file_creation.yml,Linux Possible Ssh Key File Creation,Artifact,Artifact,True,agree
+splunk,29,thirdparty/splunk-security-content/detections\endpoint\windows_drivers_loaded_by_signature.yml,Windows Drivers Loaded by Signature,Artifact,Artifact,True,agree
+splunk,30,thirdparty/splunk-security-content/detections\cloud\o365_mailbox_email_forwarding_enabled.yml,O365 Mailbox Email Forwarding Enabled,TTP,TTP,True,agree
+sigma,1,sigma/rules\windows\process_creation\proc_creation_win_susp_cross_user_process_spawn.yml,Suspicious Cross-User Process Spawn,Tool,Tool,True,agree
+sigma,2,sigma/rules\linux\process_creation\proc_creation_lnx_cap_setgid.yml,Linux Setgid Capability Set on a Binary via Setcap Utility,Tool,Artifact,False,auto_under_scores
+sigma,3,sigma/rules\category\antivirus\av_password_dumper.yml,Antivirus - Password Dumper Signature,Artifact,Artifact,True,agree
+sigma,4,sigma/rules\windows\registry\registry_set\registry_set_office_outlook_enable_macro_execution.yml,Outlook Macro Execution Without Warning Setting Enabled,Artifact,Artifact,True,agree
+sigma,5,sigma/rules\windows\file\file_delete\file_delete_win_delete_powershell_command_history.yml,PowerShell Console History Logs Deleted,Artifact,Artifact,True,agree
+sigma,6,sigma/rules\windows\builtin\system\service_control_manager\win_system_invoke_obfuscation_via_use_clip_services.yml,Invoke-Obfuscation Via Use Clip - System,Tool,Tool,True,agree
+sigma,7,sigma/rules\windows\builtin\security\win_security_register_new_logon_process_by_rubeus.yml,Register new Logon Process by Rubeus,Tool,Artifact,False,auto_under_scores
+sigma,8,sigma/rules\macos\process_creation\proc_creation_macos_binary_padding.yml,Binary Padding - MacOS,Tool,Artifact,False,auto_under_scores
+sigma,9,sigma/rules\windows\registry\registry_set\registry_set_ie_security_zone_protocol_defaults_downgrade.yml,IE ZoneMap Setting Downgraded To MyComputer Zone For HTTP Protocols,TTP,Artifact,False,auto_under_scores
+sigma,10,sigma/rules\linux\builtin\lnx_privileged_user_creation.yml,Privileged User Has Been Created,Artifact,Artifact,True,agree
+sigma,11,sigma/rules\windows\process_creation\proc_creation_win_uac_bypass_wsreset.yml,Bypass UAC via WSReset.exe,Tool,Tool,True,agree
+sigma,12,sigma/rules\windows\registry\registry_set\registry_set_office_disable_protected_view_features.yml,Microsoft Office Protected View Disabled,Artifact,Artifact,True,agree
+sigma,13,sigma/rules\windows\process_creation\proc_creation_win_powershell_cmdline_convertto_securestring.yml,ConvertTo-SecureString Cmdlet Usage Via CommandLine,Tool,Tool,True,agree
+sigma,14,sigma/rules\identity\onelogin\onelogin_user_account_locked.yml,OneLogin User Account Locked,TTP,Artifact,False,auto_under_scores
+sigma,15,sigma/rules\windows\process_creation\proc_creation_win_registry_ie_security_zone_protocol_defaults_downgrade.yml,IE ZoneMap Setting Downgraded To MyComputer Zone For HTTP Protocols Via CLI,TTP,Artifact,False,auto_under_scores
+sigma,16,sigma/rules\windows\process_creation\proc_creation_win_bcdedit_boot_conf_tamper.yml,Boot Configuration Tampering Via Bcdedit.EXE,Tool,Tool,True,agree
+sigma,17,sigma/rules\cloud\aws\cloudtrail\aws_ec2_disable_encryption.yml,AWS EC2 Disable EBS Encryption,TTP,TTP,True,agree
+sigma,18,sigma/rules\cloud\aws\cloudtrail\aws_cloudtrail_security_group_change_rds.yml,RDS Database Security Group Modification,TTP,TTP,True,agree
+sigma,19,sigma/rules\linux\auditd\execve\lnx_auditd_unzip_hidden_zip_files_steganography.yml,Steganography Unzip Hidden Information From Picture File,Tool,Artifact,False,auto_under_scores
+sigma,20,sigma/rules\windows\builtin\security\win_security_lm_namedpipe.yml,First Time Seen Remote Named Pipe,TTP,Artifact,False,auto_under_scores
+sigma,21,sigma/rules\windows\builtin\security\win_security_svcctl_remote_service.yml,Remote Service Activity via SVCCTL Named Pipe,TTP,Artifact,False,auto_under_scores
+sigma,22,sigma/rules\windows\process_creation\proc_creation_win_lolbin_pcwutl.yml,Code Execution via Pcwutl.dll,Tool,Tool,True,agree
+sigma,23,sigma/rules\windows\process_creation\proc_creation_win_renamed_binary_highly_relevant.yml,Potential Defense Evasion Via Rename Of Highly Relevant Binaries,TTP,Tool,False,auto_under_scores
+sigma,24,sigma/rules\cloud\aws\cloudtrail\aws_cloudtrail_bedrock_guardrail_deleted.yml,AWS Bedrock Guardrail Deleted,TTP,TTP,True,agree
+sigma,25,sigma/rules\windows\process_creation\proc_creation_win_powershell_susp_download_patterns.yml,Suspicious PowerShell Download and Execute Pattern,Tool,Tool,True,agree
+sigma,26,sigma/rules\windows\builtin\msexchange\win_exchange_proxyshell_certificate_generation.yml,Certificate Request Export to Exchange Webserver,Tool,Tool,True,agree
+sigma,27,sigma/rules\windows\registry\registry_set\registry_set_add_load_service_in_safe_mode.yml,Registry Persistence via Service in Safe Mode,TTP,Tool,False,auto_under_scores
+sigma,28,sigma/rules\windows\process_creation\proc_creation_win_susp_no_image_name.yml,Process Launched Without Image Name,TTP,Artifact,False,auto_under_scores
+sigma,29,sigma/rules\windows\process_creation\proc_creation_win_wpbbin_potential_persistence.yml,UEFI Persistence Via Wpbbin - ProcessCreation,Tool,Tool,True,agree
+sigma,30,sigma/rules\windows\process_creation\proc_creation_win_powershell_cl_mutexverifiers.yml,Potential Script Proxy Execution Via CL_Mutexverifiers.ps1,Tool,Tool,True,agree

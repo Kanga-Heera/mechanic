@@ -1,0 +1,15 @@
+title: Null Reference Entry
+id: 55555555-5555-5555-5555-555555555555
+status: test
+description: test rule for null-reference validator crash
+author: mechanic tests
+date: 2024-01-01
+logsource:
+    category: process_creation
+detection:
+    selection:
+        Image|endswith: '\cmd.exe'
+    condition: selection
+level: medium
+references:
+    -

@@ -1,0 +1,6 @@
+title: Bad Block Mapping
+id: 33333333-3333-3333-3333-333333333333
+detection:
+  selection:
+    Image: foo.exe
+   condition: selection

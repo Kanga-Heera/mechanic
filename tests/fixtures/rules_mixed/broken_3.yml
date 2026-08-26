@@ -1,0 +1,11 @@
+title: Null Date Field
+id: 44444444-4444-4444-4444-444444444444
+status: test
+date:
+logsource:
+    category: process_creation
+detection:
+    selection:
+        Image|endswith: '\cmd.exe'
+    condition: selection
+level: medium

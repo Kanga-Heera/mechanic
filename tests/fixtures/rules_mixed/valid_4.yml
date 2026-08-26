@@ -1,0 +1,10 @@
+title: Valid Rule 4
+id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa04
+status: test
+logsource:
+    category: process_creation
+detection:
+    selection:
+        Image|endswith: '\notepad4.exe'
+    condition: selection
+level: medium
