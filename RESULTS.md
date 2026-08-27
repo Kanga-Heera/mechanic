@@ -2013,3 +2013,187 @@ own, much longer or unbounded timeout budget, and is meant for exactly this
 "watch a long job and notify on events" pattern). This combination is what
 actually let the mining job run to completion.
 
+# Stage 3, Phase 1: verification harness + gate + hand-made repair proof
+
+Scope of this phase, deliberately: build and prove a trustworthy
+verification harness and a deterministic accept/reject gate, validated on
+repairs made **by hand** - no LLM anywhere in this phase, no repair
+generation built yet. See `docs/stage3-harness-evaluation.md` for the prior
+investigation that led here (RSigma adopted partially, Recommendation B,
+wrapped via CLI) and `docs/stage3-phase1-status.md` for the go/no-go
+decision this phase's results feed into.
+
+## Part 1 — RSigma wrapper, with the silent-zero guard built in
+
+`mechanic/verify.py` wraps RSigma's `engine eval` (pinned **v0.21.0**,
+checksum-verified prebuilt binary, version checked at every call - see the
+investigation doc for the download/pin instructions). Every event outcome
+comes back tagged `trusted` or `unverifiable`; a bare boolean is never
+returned.
+
+Two independent guards, both required before a result is trusted:
+
+1. **Schema/field-presence guard.** A dry pass with no pipeline runs
+   `--observe-fields` to discover the real nested paths RSigma parsed an
+   event into, then cross-checks the rule's own referenced fields (via
+   `mechanic.loader` + `mechanic.ast_repr`, reused unmodified) against
+   those paths. Any rule field absent from the parsed structure -> loud
+   `UNVERIFIABLE`, never a clean zero.
+2. **Event-count guard.** `events_observed` (from the same
+   `--observe-fields` report) is cross-checked against the number of
+   events actually submitted. This one wasn't in the original
+   investigation - it was found while building the wrapper (see below) -
+   and it catches RSigma silently dropping a malformed event while its
+   plain-text summary line ("Processed N events, M matches") still implies
+   every event was evaluated.
+
+**Two more silent-zero-shaped bugs found while building this** (beyond the
+one already documented in the investigation), both fixed rather than
+glossed over:
+
+- **A malformed-JSON event is silently dropped, not rejected.** A JSON file
+  with an improperly-escaped backslash (`\M` is not a valid JSON escape)
+  produced `events_observed: 0` in the field report while the plain
+  summary line still read "Processed 1 events, 0 matches" - indistinguishable
+  from a genuine, correctly-ingested no-fire unless you know to check.
+  Closed by construction: `verify.evaluate()`'s own file reader parses
+  strictly, in Python, before RSigma ever sees the file, so this can never
+  reach a mechanic caller as a quiet zero (`test_malformed_json_file_fails_loud_not_silent`).
+- **RSigma's own builtin `-p sysmon` pipeline does not flatten raw EVTX at
+  all**, for a real process_creation rule (`proc_creation_win_bitsadmin_download`).
+  The original investigation assumed (untested) that Sysmon-shaped rules
+  "work with zero extra setup" via this pipeline. Live testing while
+  building the wrapper found every EventData field the rule needs is still
+  reported missing under `-p sysmon` - and the pipeline adds its own unmet
+  `EventID` requirement on top, making it strictly worse than no pipeline
+  at all for this case. **This is a correction to the investigation doc**,
+  applied there directly rather than left standing.
+
+**The fix used throughout: discovery, not guessing.** A first-draft design
+considered a fixed "System fields -> `Event.System.*`, everything else ->
+`Event.EventData.*`" heuristic. Building Part 2's third known-answer case
+(`win_wmi_activity_nteventlogfile_cleareventlog`) proved that heuristic
+wrong on its own terms: WMI-Activity events store their payload under
+`Event.UserData.Operation_ClientFailure.*`, a third shape a binary
+System/EventData guess can't reach. The wrapper instead runs one
+no-pipeline dry pass, collects every real nested path RSigma reports as
+`unknown` for that event, and maps each of the rule's own field names to
+whichever path's last dot-segment matches it exactly - ambiguity and
+unresolved fields are recorded and surfaced, never silently guessed past.
+This one mechanism, with no rule-category special-casing, correctly
+resolved all three shapes found in Part 2 (System, EventData, UserData).
+
+**CLI**: `mechanic verify RULE --against LOGSET`, `--json`, exit code `2`
+when any result is unverifiable (so a CI pipeline can't accidentally treat
+it as green).
+
+## Part 2 — Harness self-validation on known-answer cases
+
+`tests/test_verify.py`, 7 cases, all against real SigmaHQ regression
+fixtures or hand-constructed data with an obvious correct answer - never
+data the harness itself produced:
+
+| Case | Rule / channel shape | Known answer (source) | Result |
+|---|---|---|---|
+| `test_schtasks_security_channel_known_positive` | `win_security_susp_scheduled_task_delete_or_disable` (Security channel, `Event.System`/`Event.EventData`) | `match_count: 1` (SigmaHQ's own `info.yml`) — the investigation's proven case, kept as a permanent regression | ✅ 1 match, correct field/value |
+| `test_wmi_activity_userdata_schema_known_positive` | `win_wmi_activity_nteventlogfile_cleareventlog` (WMI-Activity channel, `Event.UserData.*`) | `match_count: 1` | ✅ 1 match; also the case that caught the System/EventData heuristic bug above |
+| `test_process_creation_known_positive` | `proc_creation_win_bitsadmin_download` (process_creation/Sysmon channel) | `match_count: 1` | ✅ 1 match |
+| `test_process_creation_builtin_sysmon_pipeline_does_not_flatten_raw_evtx` | same rule, `-p sysmon`, auto-discovery disabled | should be UNVERIFIABLE (fields genuinely missing) | ✅ UNVERIFIABLE — the live proof behind the investigation-doc correction above |
+| `test_benign_flat_json_confirmed_no_fire` | same Security-channel rule, hand-built benign flat JSON | should not fire, trusted | ✅ no fire, trusted (not just absent) |
+| `test_field_mismatched_rule_trips_unverifiable_guard` | same rule, one field renamed to a nonexistent name | must trip UNVERIFIABLE, never a clean zero | ✅ UNVERIFIABLE, reason names the missing field |
+| `test_malformed_json_file_fails_loud_not_silent` | same rule, deliberately-invalid JSON event file | must fail loud, not silently evaluate | ✅ raises `VerifyError` before RSigma is even invoked |
+
+All 7 pass. Per this phase's own rule ("the harness does not get the
+benefit of the doubt"), any failure here would have stopped work before
+Part 3 - none did, but Part 2 did find and cause the fix of two real bugs
+(the System/EventData heuristic, and the untested `-p sysmon` assumption)
+before the gate was allowed to depend on either.
+
+## Part 3 — The four-condition gate + hand-made repair proof
+
+`mechanic/gate.py` implements the deterministic gate over
+`(original_rule, repaired_rule, malicious_events, benign_events)`:
+
+1. **EVASIONS_CAUGHT** — repaired fires on evasion variants the original missed
+2. **ORIGINAL_STILL_CAUGHT** — repaired still fires on the original's own true positives
+3. **NO_NEW_FALSE_POSITIVES** — repaired fires on no benign event the original didn't already fire on
+4. **INTENT_PRESERVED** — same logsource + same ATT&CK technique tags (structural/metadata only, no RSigma call)
+
+Condition 2 deliberately goes through the harness's own `evaluate()` rather
+than shelling out to RSigma's `rule tune` (which the investigation
+confirmed does verify TP-preservation, but as part of proposing a new
+suppression filter, which needs a synthetic FP set to do anything useful) -
+one harness, one guard, for all three event-based conditions. Any
+`UNVERIFIABLE` harness result inside a condition makes that condition
+`UNVERIFIABLE`, checked *before* pass/fail is even considered, and any
+`UNVERIFIABLE` condition makes the overall verdict `UNVERIFIABLE` - never
+averaged into a silent PASS or FAIL.
+
+### The 5 hand-made repairs (no LLM anywhere)
+
+`tests/test_gate_hand_repairs.py`. Every rule, evasion, and benign event
+was written by hand; the correct verdict was decided before the gate was
+run, not after.
+
+| # | Original rule (fragility) | Repair | Expected | **Actual verdict** |
+|---|---|---|---|---|
+| R1 | `Image\|endswith: '\whoami.exe'` (filename-only) | Durable fix: `OriginalFileName: whoami.exe` | PASS | **PASS** ✅ |
+| R2 | `CommandLine\|contains` exact flag order (`certutil -urlcache -f`) | Durable fix: `contains\|all` (order-independent) | PASS | **PASS** ✅ |
+| R3 | Exact literal IEX/WebClient download-cradle string | **Deliberately bad**: widened to `CommandLine\|contains: 'powershell'` | FAIL (condition 3) | **FAIL** ✅ — fires on 3/3 benign events |
+| R4 | Same as R3 | Plausible-looking but insufficient: adds a casing variant, misses the real (backtick-obfuscation) evasion | FAIL (condition 1) | **FAIL** ✅ — does not fire on the evasion |
+| R5 | Single hardcoded C2 IP, no behavioral observable at all | Attempted generalization: widen to a /24 | FAIL (condition 1) — correct disposition is retire | **FAIL** ✅ — attacker just rotates to a different /24 |
+
+**R3 is the load-bearing case.** Its own docstring says it plainly: "if the
+gate had accepted this, the gate would be broken." A rule that fires on
+`powershell.exe -File C:\Scripts\Backup.ps1`, an ordinary `Get-Process`
+pipeline, and a plain `Get-ChildItem` invocation is not a repair, it's a
+different and much worse rule - and the gate rejected it, specifically on
+condition 3, with the exact 3 newly-caught benign indices as evidence. R4
+proves the gate isn't just checking "did it get broader" - a repair that
+stayed appropriately narrow but still missed the actual evasion also
+correctly fails, on condition 1 instead. R5 demonstrates the gate can
+support a retire recommendation with evidence, not just a repair/no-repair
+binary: even a reasonable-looking generalization of a pure IOC still can't
+pass, because there's no durable observable underneath it to generalize
+*to*.
+
+Full verbatim evidence (all four conditions' evidence dicts, for all 5
+cases) is captured in the test file itself and reproducible by running:
+
+```
+mechanic_venv/bin/pytest tests/test_gate_hand_repairs.py -v
+```
+
+One verbatim example (R3, the load-bearing case), condition 3's evidence
+exactly as the gate produced it:
+
+```json
+{
+  "name": "NO_NEW_FALSE_POSITIVES",
+  "status": "trusted",
+  "passed": false,
+  "evidence": {
+    "count": 3,
+    "original_fp_count": 0,
+    "repaired_fp_count": 3,
+    "new_fps": [0, 1, 2],
+    "pre_existing_fps_still_present": []
+  },
+  "reasons": ["repaired rule fires on 3 benign event(s) the original did not: indices [0, 1, 2]"]
+}
+```
+
+### Reproducing this phase
+
+```
+export MECHANIC_RSIGMA_BIN=/path/to/pinned/rsigma   # v0.21.0, see docs/stage3-harness-evaluation.md
+pytest tests/test_verify.py -v              # Part 2: harness self-validation
+pytest tests/test_gate_hand_repairs.py -v   # Part 3: gate proof
+```
+
+Full suite (110 tests, including all pre-existing Stage 1/2 tests): all
+pass, no regressions.
+
+See `docs/stage3-phase1-status.md` for the honest go/no-go assessment this
+phase's results support.
+
