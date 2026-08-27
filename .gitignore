@@ -15,3 +15,21 @@ venv/
 
 # stray empty debug file found during repo init, not needed
 _probe_check.txt
+
+# Stage 3: third-party rule corpora / regression-data clones referenced by
+# absolute path from tests and scratch scripts live outside this repo
+# (D:\sigma-research\sigma, thirdparty\*) - if anything ever gets vendored
+# in locally under this name, it's not source either.
+thirdparty/
+
+# Stage 3: mining-cache / verify-harness pickles - regenerable, not source.
+*.pkl
+
+# Stage 3: the pinned RSigma binary itself is not source - see
+# docs/stage3-harness-evaluation.md for the pinned version (v0.21.0) and
+# checksum-verified download instructions. Kept outside this repo at
+# D:\sigma-research\tools\rsigma\, pointed to via $MECHANIC_RSIGMA_BIN.
+rsigma
+rsigma.exe
+rsigma-lsp
+rsigma-lsp.exe
