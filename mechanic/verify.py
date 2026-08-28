@@ -49,6 +49,26 @@ specific reason) - a plain boolean fire/no-fire is never handed back
 without one of those two labels attached. Callers (mechanic/gate.py, the
 `mechanic verify` CLI command) must never treat "unverifiable" as either a
 pass or a fail.
+
+Stage 3 Phase 2, Part 3 added multi-record EVTX per-record accounting
+(previously: any file with more than 1 record came back as a single
+UNVERIFIABLE aggregate - see docs/stage3-phase1-status.md). Building the
+real multi-record test fixture (a genuine, locally-exported multi-record
+.evtx - see tests/test_verify.py's module docstring for how it was made
+and why) surfaced a THIRD instance of the exact same silent-zero family:
+
+3. Last-path-segment discovery (finding #2's fix) matched a rule field
+   name against a discovered path's raw final dot-segment - which works for
+   a Sysmon-style NAMED <Data Name='Image'>...</Data> element (RSigma
+   reports it at .../EventData/Image), but not for a classic/legacy,
+   non-manifested Windows Event Log's UNNAMED <Data>...</Data> element (no
+   Name attribute to key by at all): RSigma reports that one's content at
+   .../EventData/Data/#text, whose last segment is the literal string
+   "#text", not "Data" - so a rule field named "Data" came back unresolved
+   even though the value was right there. Fixed in `_match_key` by
+   stripping a trailing ".#text" pseudo-segment before comparing - the
+   mapping itself still stores the full original path, only the *matching*
+   key is adjusted.
 """
 
 from __future__ import annotations
@@ -244,12 +264,32 @@ class PipelineDiscovery:
         }
 
 
+def _match_key(path: str) -> str:
+    """The field-name-shaped part of an observed path, for last-segment
+    matching. RSigma renders an XML element's own text content as
+    '<path>.#text' whenever that element ALSO has attributes (seen on
+    <EventID Qualifiers='0'>9911</EventID> -> 'Event.System.EventID.#text')
+    - and, discovered while building Part 3's multi-record fixture, this
+    also happens for a plain, attribute-less <Data>value</Data> element
+    when it carries no Name attribute (the classic/legacy, non-manifested
+    Windows Event Log shape - no Sysmon-style 'Name=' present at all, so
+    there's nothing to key each Data element by, only its text content):
+    'Event.EventData.Data.#text'. Stripping a trailing '.#text' before
+    taking the last segment is what lets a rule field named 'Data' resolve
+    against that path at all - without this, '#text' (not 'Data') would be
+    the last segment and the field would come back unresolved even though
+    the value is right there."""
+    if path.endswith(".#text"):
+        path = path[: -len(".#text")]
+    return path.rsplit(".", 1)[-1]
+
+
 def _discover_pipeline(rsigma_bin: Path, rule_path: Path, event_path: Path, rule_fields: list[str], tmp_dir: Path) -> PipelineDiscovery:
     """Dry pass with no pipeline: whatever real nested paths RSigma reports
     as 'unknown' for this event are the raw, un-mapped truth for this event
     source. Match each rule field name against candidates whose path's last
-    dot-segment equals it exactly. This is discovery, not a guess about
-    which of System/EventData/UserData a given channel uses."""
+    dot-segment (see _match_key) equals it exactly. This is discovery, not
+    a guess about which of System/EventData/UserData a given channel uses."""
     report = _observe_fields(rsigma_bin, rule_path, event_path, None, tmp_dir / "discover_fields.json")
     # `missing` entries in this dry (no-pipeline) pass are just the rule's own field names
     # echoed back unmapped - not real observed paths. Only `unknown` entries are genuine
@@ -257,7 +297,7 @@ def _discover_pipeline(rsigma_bin: Path, rule_path: Path, event_path: Path, rule
     observed_paths = [u["field"] for u in report.get("unknown", [])]
     candidates_by_last_segment: dict[str, list[str]] = {}
     for path in observed_paths:
-        last = path.rsplit(".", 1)[-1]
+        last = _match_key(path)
         candidates_by_last_segment.setdefault(last, []).append(path)
 
     mapping: dict[str, str] = {}
@@ -503,6 +543,64 @@ def _probe_individual_parse(rsigma_bin: Path, rule_path: Path, pipeline_path: Op
 # ---------------------------------------------------------------------------
 
 
+_RECORD_ID_FIELD = "EventRecordID"
+# Every Windows EVTX record carries its own unique EventRecordID
+# (Microsoft-documented, monotonically increasing per channel) - used here
+# purely as a correlation key, never as rule-matching content.
+_CATCHALL_RULE_ID = "8f2b8b2e-9c1a-4b7b-8f0a-mechanic00001"
+_CATCHALL_RULE_YAML = f"""title: mechanic internal record enumeration (not a detection rule)
+id: {_CATCHALL_RULE_ID}
+status: test
+logsource: {{category: process_creation, product: windows}}
+detection:
+    selection:
+        {_RECORD_ID_FIELD}: '*'
+    condition: selection
+"""
+
+
+def _extract_by_dotted_path(obj: Any, dotted_path: str) -> Any:
+    """Walk a nested dict (as embedded via --include-event) by a
+    '.'-joined path exactly as reported by --observe-fields (including a
+    literal '#text'/'#attributes.X' pseudo-segment where present - these
+    are ordinary dict keys in the embedded JSON, not special syntax)."""
+    cur = obj
+    for part in dotted_path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _enumerate_evtx_records(
+    rsigma_bin: Path, evtx_path: Path, pipeline_path: Optional[Path], record_id_path: str, tmp_dir: Path
+) -> tuple[list[Any], dict]:
+    """Run a trivial always-true rule (EventRecordID wildcard match) through
+    the SAME discovered pipeline to enumerate every record's own id, in
+    file order - this is how the total record set (fired or not) is known
+    at all, since RSigma's normal match output only ever reports records
+    that fired. Returns (record_ids, field_report) - the field_report's
+    own events_observed is cross-checked by the caller against this list's
+    length, the same "don't trust a bare count" discipline as the JSON
+    path's _probe_individual_parse."""
+    rule_path = tmp_dir / "mechanic_catchall_rule.yml"
+    rule_path.write_text(_CATCHALL_RULE_YAML, encoding="utf-8")
+    report_path = tmp_dir / "catchall_fields_report.json"
+    args = ["engine", "eval", "-r", str(rule_path)]
+    if pipeline_path is not None:
+        args += ["-p", str(pipeline_path)]
+    args += [
+        "-e", f"@{evtx_path}",
+        "--include-event", "--match-detail", "off", "--output-format", "json",
+        "--observe-fields", "--observe-fields-report", str(report_path),
+    ]
+    proc = _run(rsigma_bin, args)
+    matched = _parse_matched_lines(proc.stdout)
+    ids = [_extract_by_dotted_path(m.get("event", {}), record_id_path) for m in matched]
+    field_report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {"summary": {"events_observed": 0}}
+    return ids, field_report
+
+
 def _evaluate_evtx(
     rsigma_bin: Path,
     rule_path: Path,
@@ -515,7 +613,11 @@ def _evaluate_evtx(
     discovery: Optional[PipelineDiscovery] = None
     generated_pipeline_path = pipeline_path
     if pipeline_path is None and auto_pipeline:
-        discovery = _discover_pipeline(rsigma_bin, rule_path, evtx_path, rule_fields, tmp_dir)
+        # Always also resolve EventRecordID, even though no rule asked for
+        # it - Part 3's multi-record path needs it to correlate matches
+        # back to individual records (see _enumerate_evtx_records).
+        fields_for_discovery = list(dict.fromkeys([*rule_fields, _RECORD_ID_FIELD]))
+        discovery = _discover_pipeline(rsigma_bin, rule_path, evtx_path, fields_for_discovery, tmp_dir)
         if discovery.mapping:
             generated_pipeline_path = tmp_dir / "auto_pipeline.yml"
             generated_pipeline_path.write_text(
@@ -541,13 +643,12 @@ def _evaluate_evtx(
     total = summary[0] if summary else field_report.get("summary", {}).get("events_observed", 0)
     match_count = summary[1] if summary else len(matched)
 
+    if total != 1 and total >= 2:
+        return _evaluate_evtx_multi_record(
+            rsigma_bin, evtx_path, generated_pipeline_path, discovery, total, matched, missing_names, field_report, tmp_dir
+        )
     if total != 1:
-        reasons = [
-            f"EVTX file contains {total} record(s); per-record fire/no-fire accounting for "
-            "multi-record EVTX is not implemented in this phase (see docs/stage3-phase1-status.md) "
-            "- only the aggregate match count is available, which is not enough to trust a "
-            "per-event verdict."
-        ]
+        reasons = [f"EVTX file contains {total} record(s); expected at least 1."]
         outcomes = [EventOutcome(index=0, fired=match_count > 0, status="unverifiable", reasons=reasons)]
     elif missing_names:
         reasons = [f"rule references field(s) missing from the parsed EVTX structure even after discovery: {missing_names}"]
@@ -555,6 +656,79 @@ def _evaluate_evtx(
     else:
         mf = [x for m in matched for x in m.get("matched_fields", [])]
         outcomes = [EventOutcome(index=0, fired=match_count > 0, status="trusted", reasons=[], matched_fields=mf)]
+    return outcomes, field_report, discovery
+
+
+def _evaluate_evtx_multi_record(
+    rsigma_bin: Path,
+    evtx_path: Path,
+    pipeline_path: Optional[Path],
+    discovery: Optional[PipelineDiscovery],
+    total: int,
+    matched: list[dict],
+    missing_names: list[str],
+    field_report: dict,
+    tmp_dir: Path,
+) -> tuple[list[EventOutcome], Optional[dict], Optional[PipelineDiscovery]]:
+    """Stage 3 Phase 2, Part 3: per-record fire/no-fire accounting for a
+    multi-record EVTX file (Phase 1's stated gap). Correlates each match
+    back to the specific record it came from via EventRecordID, enumerated
+    independently through a trivial always-true rule (_enumerate_evtx_records)
+    since RSigma's normal output only lists records that fired. Every
+    verification step here can fail closed to a single aggregate
+    UNVERIFIABLE outcome (never a silently-clean per-record count) if
+    EventRecordID can't be resolved, or the enumeration pass's own numbers
+    don't add up."""
+    record_id_path = discovery.mapping.get(_RECORD_ID_FIELD) if discovery else None
+    if record_id_path is None:
+        reasons = [
+            f"EVTX file contains {total} records but this file's own {_RECORD_ID_FIELD} field could not be "
+            "unambiguously resolved during pipeline discovery, so per-record fire/no-fire correlation isn't "
+            "possible - only the aggregate match count is available, which is not enough to trust a "
+            "per-event verdict."
+        ]
+        return [EventOutcome(index=0, fired=len(matched) > 0, status="unverifiable", reasons=reasons)], field_report, discovery
+
+    all_ids, catchall_report = _enumerate_evtx_records(rsigma_bin, evtx_path, pipeline_path, record_id_path, tmp_dir)
+    catchall_observed = catchall_report.get("summary", {}).get("events_observed", 0)
+    unique_ids = {rid for rid in all_ids if rid is not None}
+    enumeration_ok = catchall_observed == total and len(all_ids) == total and len(unique_ids) == total
+    if not enumeration_ok:
+        reasons = [
+            f"could not reliably enumerate all {total} record(s) via the {_RECORD_ID_FIELD} catch-all pass "
+            f"(catch-all matched {len(all_ids)}/{total} records, catch-all's own events_observed="
+            f"{catchall_observed}, {len(unique_ids)} distinct id(s) among them) - per-record accounting is "
+            "not trustworthy here; treating the whole file as one unverifiable unit rather than guessing."
+        ]
+        return [EventOutcome(index=0, fired=len(matched) > 0, status="unverifiable", reasons=reasons)], field_report, discovery
+
+    fired_ids = set()
+    for m in matched:
+        rid = _extract_by_dotted_path(m.get("event", {}), record_id_path)
+        if rid is not None:
+            fired_ids.add(rid)
+
+    # A whole-file schema problem (a rule field missing everywhere) applies
+    # uniformly to every record - marking every outcome unverifiable
+    # together is exactly the same "don't silently average it away"
+    # behaviour the single-record path already has, just applied per-record
+    # here so gate._all_trusted_fired's own any-unverifiable-poisons-the-
+    # batch logic sees it correctly.
+    schema_reason = (
+        [f"rule references field(s) missing from the parsed EVTX structure even after discovery: {missing_names}"]
+        if missing_names
+        else []
+    )
+    outcomes = [
+        EventOutcome(
+            index=i,
+            fired=(rid in fired_ids),
+            status="unverifiable" if missing_names else "trusted",
+            reasons=list(schema_reason),
+            label=f"{_RECORD_ID_FIELD}={rid}",
+        )
+        for i, rid in enumerate(all_ids)
+    ]
     return outcomes, field_report, discovery
 
 
@@ -578,10 +752,15 @@ def evaluate(
     trusted or unverifiable. Never returns a bare boolean.
 
     `events` may be:
-      - a Path/str ending in .evtx: evaluated as one EVTX unit. Fully
-        per-event-trusted only when the file contains exactly one record
-        (true of every known-answer fixture used in this project) - see
-        the module docstring for why multi-record EVTX isn't attempted yet.
+      - a Path/str ending in .evtx: evaluated per-record. A single-record
+        file returns one outcome, same as before. A multi-record file
+        (Stage 3 Phase 2, Part 3) returns one outcome per record, each
+        independently fired/not-fired via EventRecordID correlation against
+        a trivial always-true enumeration pass (see _evaluate_evtx_multi_record)
+        - trusted only when that record's own field-presence check passes
+        AND the enumeration pass's own record count/uniqueness checks out;
+        any doubt collapses to a single aggregate UNVERIFIABLE outcome for
+        the whole file rather than a guessed per-record split.
       - a Path/str to a .json (single object or JSON array) or .ndjson file.
       - a list[dict] of events directly (the common case for hand-built
         gate inputs) - written to a temp NDJSON file internally.
