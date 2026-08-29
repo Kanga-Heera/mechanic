@@ -333,6 +333,15 @@ class EventOutcome:
     reasons: list[str] = field(default_factory=list)
     matched_fields: list[dict] = field(default_factory=list)
     label: Optional[str] = None
+    # Stage 3 Phase 3: populated (only) when this outcome is unverifiable
+    # specifically because the rule references field(s) genuinely absent
+    # from the parsed event schema - i.e. the same condition the `reasons`
+    # prose already describes, exposed here as structured data instead of a
+    # string a caller would otherwise have to regex back out. This is what
+    # lets mechanic.repair_outcome detect a TELEMETRY_REPAIR case
+    # deterministically (a rule referencing a field the log source can't
+    # provide) without re-parsing reasons text.
+    missing_fields: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -342,6 +351,7 @@ class EventOutcome:
             "status": self.status,
             "reasons": self.reasons,
             "matched_fields": self.matched_fields,
+            "missing_fields": self.missing_fields,
         }
 
 
@@ -510,7 +520,17 @@ def _evaluate_json_events(
             status = "trusted"
         fired = i in fired_by_idx
         mf = [x for m in fired_by_idx.get(i, []) for x in m.get("matched_fields", [])]
-        outcomes.append(EventOutcome(index=i, fired=fired, status=status, reasons=reasons, matched_fields=mf, label=(labels[i] if labels else None)))
+        outcomes.append(
+            EventOutcome(
+                index=i,
+                fired=fired,
+                status=status,
+                reasons=reasons,
+                matched_fields=mf,
+                label=(labels[i] if labels else None),
+                missing_fields=list(missing_names) if schema_bad else [],
+            )
+        )
     return outcomes, field_report
 
 
@@ -652,7 +672,7 @@ def _evaluate_evtx(
         outcomes = [EventOutcome(index=0, fired=match_count > 0, status="unverifiable", reasons=reasons)]
     elif missing_names:
         reasons = [f"rule references field(s) missing from the parsed EVTX structure even after discovery: {missing_names}"]
-        outcomes = [EventOutcome(index=0, fired=match_count > 0, status="unverifiable", reasons=reasons)]
+        outcomes = [EventOutcome(index=0, fired=match_count > 0, status="unverifiable", reasons=reasons, missing_fields=list(missing_names))]
     else:
         mf = [x for m in matched for x in m.get("matched_fields", [])]
         outcomes = [EventOutcome(index=0, fired=match_count > 0, status="trusted", reasons=[], matched_fields=mf)]
@@ -726,10 +746,76 @@ def _evaluate_evtx_multi_record(
             status="unverifiable" if missing_names else "trusted",
             reasons=list(schema_reason),
             label=f"{_RECORD_ID_FIELD}={rid}",
+            missing_fields=list(missing_names) if missing_names else [],
         )
         for i, rid in enumerate(all_ids)
     ]
     return outcomes, field_report, discovery
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 Phase 3: EVTX -> flat dict bridge
+# ---------------------------------------------------------------------------
+
+
+def flat_event_from_evtx(
+    rule_path: Union[str, Path], evtx_path: Union[str, Path], *, rsigma_bin: Optional[Union[str, Path]] = None, tmp_dir: Optional[Path] = None
+) -> dict[str, Any]:
+    """Project the ONE firing record of a genuine EVTX fixture (e.g.
+    SigmaHQ's own `regression_data` corpus, each with an `info.yml`
+    declaring its own hand-verified `match_count`) down to a flat dict
+    keyed by the RULE's own field names, using the exact same
+    discover-don't-guess pipeline this module already trusts
+    (`_discover_pipeline`) rather than a second, independently-invented
+    flattening scheme.
+
+    This is the bridge that lets `mechanic.evasion`'s dict-shaped
+    `template_event` (built for Phase 2's hand-authored events) also work
+    for a rule this project has no hand-authored event for - the Phase 3
+    stratified sample draws its true-positive template from a real,
+    independently-sourced fixture this way instead of a synthetic or
+    invented one.
+
+    Raises VerifyError (never silently guesses) if:
+      - any of the rule's own fields fail to resolve during discovery,
+      - the rule does not fire on the file at all (no positive record to
+        project), or
+      - the rule fires on more than one record (ambiguous which is the
+        declared true positive - expected exactly 1, per the fixture's own
+        info.yml)."""
+    rule_path = Path(rule_path)
+    evtx_path = Path(evtx_path)
+    resolved_bin = find_rsigma_binary(rsigma_bin)
+    rule_info = load_rule_info(rule_path)
+
+    with _tmp_dir(tmp_dir) as td:
+        discovery = _discover_pipeline(resolved_bin, rule_path, evtx_path, rule_info.fields, td)
+        if discovery.unresolved:
+            raise VerifyError(
+                f"{rule_path}: field(s) {discovery.unresolved} did not resolve against {evtx_path} during "
+                "discovery - cannot build a template event for this rule/fixture pair."
+            )
+        pipeline_path = td / "flat_event_pipeline.yml"
+        pipeline_path.write_text(
+            yaml.safe_dump(discovery.to_pipeline_dict("mechanic flat-event projection"), sort_keys=False),
+            encoding="utf-8",
+        )
+        args = [
+            "engine", "eval", "-r", str(rule_path), "-p", str(pipeline_path),
+            "-e", f"@{evtx_path}", "--include-event", "--match-detail", "off", "--output-format", "json",
+        ]
+        proc = _run(resolved_bin, args)
+        matched = _parse_matched_lines(proc.stdout)
+
+    if not matched:
+        raise VerifyError(f"{rule_path} does not fire on any record in {evtx_path} - no known-positive record to project.")
+    if len(matched) > 1:
+        raise VerifyError(
+            f"{rule_path} fires on {len(matched)} record(s) in {evtx_path} - ambiguous which is the declared "
+            "true positive; expected exactly 1 (per this fixture's own info.yml match_count)."
+        )
+    full_event = matched[0].get("event", {})
+    return {field_name: _extract_by_dotted_path(full_event, path) for field_name, path in discovery.mapping.items()}
 
 
 # ---------------------------------------------------------------------------

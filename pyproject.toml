@@ -13,6 +13,7 @@ dependencies = [
     "rich>=13.0",
     "rich-click>=1.7",
     "pyyaml>=6.0",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]

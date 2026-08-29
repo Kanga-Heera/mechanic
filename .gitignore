@@ -25,6 +25,11 @@ thirdparty/
 # Stage 3: mining-cache / verify-harness pickles - regenerable, not source.
 *.pkl
 
+# Stage 3 Phase 3: local LLM API keys (GROQ_API_KEY etc.) - see
+# mechanic/llm_client.py's module docstring. Never committed; .env.example
+# (a placeholder, no real key) is the only committed reference.
+.env
+
 # Stage 3: the pinned RSigma binary itself is not source - see
 # docs/stage3-harness-evaluation.md for the pinned version (v0.21.0) and
 # checksum-verified download instructions. Kept outside this repo at
