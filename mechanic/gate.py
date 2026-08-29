@@ -79,11 +79,29 @@ class GateReport:
     def condition(self, name: str) -> ConditionResult:
         return next(c for c in self.conditions if c.name == name)
 
+    @property
+    def fully_exercised(self) -> bool:
+        """False when at least one condition was `applicable=False` (no
+        events of that kind were supplied) - a PASS reached with a
+        not-applicable condition rested on FEWER checks than a normal PASS,
+        and callers must not treat it the same. Found to matter concretely
+        in Stage 3 Phase 2 Part 4: a rule whose only fragile atom is a raw
+        IOC (e.g. DestinationIp) gets zero mechanically-generated evasions
+        by design (mechanic.evasion only targets command-line-shaped
+        fields - see its module docstring), so EVASIONS_CAUGHT comes back
+        not-applicable and a repair that does NOT actually resist evasion
+        (widening an IP to a /24) can reach an overall PASS purely on
+        conditions 2-4. That PASS is real (nothing was faked), but it is
+        NOT evidence the repair resists evasion - see
+        docs/stage3-phase2-status.md."""
+        return all(c.applicable for c in self.conditions)
+
     def to_dict(self) -> dict:
         return {
             "original_rule": self.original_rule,
             "repaired_rule": self.repaired_rule,
             "verdict": self.verdict,
+            "fully_exercised": self.fully_exercised,
             "conditions": [c.to_dict() for c in self.conditions],
         }
 
