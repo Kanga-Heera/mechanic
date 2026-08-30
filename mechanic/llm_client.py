@@ -18,15 +18,22 @@ acceptance-rate result measures the REPAIR-GENERATION FRAMEWORK, not what
 a larger or differently-hosted model could do - a real limitation, stated
 here once and repeated wherever a Phase 3 result is reported.
 
-Model id: DEFAULT_MODEL below was looked up live against
-console.groq.com/docs/models on 2026-08-29 (see docs/stage3-phase3-status.md
-for the lookup trail) rather than assumed from training data - Groq rotates
-model ids over time, and a hardcoded assumption would silently go stale.
-llama-3.3-70b-versatile is Groq's current production 70B-class Llama model
-(131,072-token context, ~280 tok/s) - the right capability tier for
-rule-repair reasoning per the Phase 3 spec. If it is later deprecated,
-update DEFAULT_MODEL (or pass model= / set MECHANIC_LLM_MODEL) after
-re-checking that same page - never guess a replacement id.
+Model id: DO NOT trust a docs page alone - the authoritative source is
+this account's own live `GET /v1/models` response, checked by the Part 0
+smoke test on 2026-08-29. That check caught a real, live discrepancy
+worth recording: console.groq.com/docs/models (fetched the same day)
+still listed `llama-3.3-70b-versatile` with no deprecation notice, but
+this account's actual `/v1/models` response no longer includes it or any
+other Llama 3.x model at all (HTTP 404 "model_not_found" on first smoke
+attempt) - Groq deprecated it days earlier and the docs page had not
+caught up. DEFAULT_MODEL below (`openai/gpt-oss-120b`) is Groq's own
+documented recommended replacement, confirmed present in this account's
+live model list at the same 131,072-token context window - the right
+capability tier for rule-repair reasoning per the Phase 3 spec, just not
+a Llama model, because no Llama model of that tier remains available. If
+this is later deprecated too, re-check `GET /v1/models` directly (not
+just a docs page) before picking a replacement - see
+docs/stage3-phase3-status.md for the full trail.
 
 REFUSE-LOUD CONTRACT (never fabricate a repair without a real model call):
 `resolve_api_key()` raises `LLMConfigError` - not a fallback, not a
@@ -50,6 +57,8 @@ into git.
 from __future__ import annotations
 
 import os
+import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -57,7 +66,7 @@ from typing import Optional
 import requests
 
 DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 API_KEY_ENV = "GROQ_API_KEY"
 
 # Optional overrides so switching providers never requires editing this
@@ -89,6 +98,30 @@ class ChatResponse:
     raw: dict
     model: str
     endpoint: str
+
+
+_RETRY_AFTER_RE = re.compile(r"try again in ([\d.]+)s", re.IGNORECASE)
+
+
+def _parse_retry_after_seconds(resp: requests.Response, fallback: float) -> float:
+    """Groq's 429 body names an exact wait ("Please try again in 6.29s")
+    - prefer that over a generic fallback so retries are no slower than
+    necessary. Falls back to the Retry-After header, then `fallback`, if
+    the body doesn't parse."""
+    try:
+        msg = resp.json().get("error", {}).get("message", "")
+        m = _RETRY_AFTER_RE.search(msg)
+        if m:
+            return float(m.group(1))
+    except (ValueError, AttributeError):
+        pass
+    header = resp.headers.get("Retry-After")
+    if header:
+        try:
+            return float(header)
+        except ValueError:
+            pass
+    return fallback
 
 
 def _load_dotenv_if_present(dotenv_path: Optional[Path] = None) -> None:
@@ -148,13 +181,24 @@ def chat_completion(
     require_api_key: bool = True,
     temperature: float = 0.2,
     max_tokens: int = 2000,
-    timeout: int = 60,
+    timeout: tuple = (10, 45),
+    max_retries: int = 5,
 ) -> ChatResponse:
     """One OpenAI-compatible chat-completions call. Raises LLMConfigError
     before ever making a network request if the key is required and
-    missing; raises LLMRequestError for any network/HTTP/parsing failure.
-    Never returns a fabricated ChatResponse - a return value here always
-    means a real HTTP round trip to `endpoint` succeeded and was parsed."""
+    missing; raises LLMRequestError for any network/HTTP/parsing failure
+    that survives retrying. Never returns a fabricated ChatResponse - a
+    return value here always means a real HTTP round trip to `endpoint`
+    succeeded and was parsed.
+
+    A 429 (rate limit) is retried automatically, up to `max_retries` times,
+    honoring the wait time Groq's own error body names - this is
+    throttling, not a capability signal, and must never be counted as a
+    generation failure or a "no repair possible" outcome (see
+    docs/stage3-phase3-status.md for why this mattered concretely: the
+    first real Phase 3 batch run, before this retry existed, silently
+    turned free-tier TPM throttling into 15/28 rules recorded as
+    RUN_ERROR - infrastructure noise, not a model-capability finding)."""
     resolved_base_url = resolve_base_url(base_url)
     resolved_model = resolve_model(model)
     api_key = resolve_api_key(api_key_env, required=require_api_key)
@@ -170,10 +214,28 @@ def chat_completion(
         "max_tokens": max_tokens,
     }
 
-    try:
-        resp = requests.post(endpoint, headers=headers, json=payload, timeout=timeout)
-    except requests.RequestException as e:
-        raise LLMRequestError(f"request to {endpoint} failed: {e}") from e
+    resp: Optional[requests.Response] = None
+    last_exc: Optional[requests.RequestException] = None
+    for attempt in range(max_retries + 1):
+        last_exc = None
+        try:
+            resp = requests.post(endpoint, headers=headers, json=payload, timeout=timeout)
+        except requests.RequestException as e:
+            # A connect/read timeout - including a stale/half-closed
+            # connection the OS never reported cleanly (observed in
+            # practice: TCP CLOSE_WAIT that outlived the read timeout on a
+            # flaky network path) - is retried with a FRESH connection,
+            # same as a 429, rather than immediately failing the whole
+            # rule. Only the last attempt's exception is ever raised.
+            last_exc = e
+            if attempt == max_retries:
+                raise LLMRequestError(f"request to {endpoint} failed after {max_retries + 1} attempt(s): {e}") from e
+            time.sleep(2.0 * (attempt + 1))
+            continue
+        if resp.status_code != 429 or attempt == max_retries:
+            break
+        wait = _parse_retry_after_seconds(resp, fallback=2.0 * (attempt + 1))
+        time.sleep(wait)
 
     if resp.status_code != 200:
         raise LLMRequestError(f"{endpoint} returned HTTP {resp.status_code}: {resp.text[:2000]}")

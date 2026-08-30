@@ -2472,3 +2472,326 @@ See `docs/stage3-phase2-status.md` for the honest go/no-go assessment this
 phase's results support, including the explicit recommendation on how a
 future probabilistic repair generator must treat `gate.fully_exercised`.
 
+# Stage 3, Phase 3: LLM repair generator (model-agnostic, Groq default)
+
+This phase adds the first and only probabilistic component in the entire
+pipeline: an LLM that *proposes* a repaired rule. Everything downstream of
+it — the harness, the gate, the evasion transformer — is the same
+deterministic machinery proven in Phases 1 and 2, completely unmodified in
+its decision logic. The LLM never judges its own output; the gate does,
+exactly as it judged the five hand-made repairs and the mechanically
+re-evaluated ones. `docs/kappa-provenance.md`'s lesson (an unaudited
+component quietly deciding the headline number) is the reason Part 4 below
+exists before this phase's acceptance rate is used for anything.
+
+## Part 0 — model-agnostic client, Groq default
+
+`mechanic/llm_client.py` speaks the OpenAI chat-completions HTTP format
+(shared by Groq, local Ollama, and most paid providers), so switching
+providers is a `base_url`/`model` change, not a rewrite. Groq is the
+default because the target machine is an 8GB laptop that cannot run a
+70B-class model locally — generation uses a free-tier hosted model while
+every verification step still runs entirely locally and deterministically.
+**This means the acceptance rate below measures the repair-generation
+framework, not what a larger or differently-hosted model could do** — a
+real limitation, stated here once and not repeated as a hedge on every
+number below.
+
+The API key is read only from `os.environ["GROQ_API_KEY"]`
+(`resolve_api_key()`); if unset, `LLMConfigError` is raised with a
+multi-shell (`$env:` / `setx` / `export`) message — the client never
+fabricates a repair without a real model call. The key was supplied by the
+user directly into their own shell environment; it was never typed,
+echoed, hardcoded, or written to any file by this project, and `.env` is
+git-ignored (`.env.example` is the only committed reference, a
+placeholder with no real key).
+
+**Model id — a real, live discrepancy caught before it could bias
+anything.** The task spec required looking up the current model live
+rather than assuming from training data. `console.groq.com/docs/models`
+(checked 2026-08-29) still listed `llama-3.3-70b-versatile` with no
+deprecation notice; this account's own `GET /v1/models` response did not
+— it returned HTTP 404 `model_not_found` on the first live smoke-test
+call, and the account's actual model list contained no Llama 3.x model at
+all. `DEFAULT_MODEL` was set to `openai/gpt-oss-120b` instead — Groq's own
+documented recommended replacement, confirmed present in the live list at
+the same 131,072-token context window (the right capability tier for
+rule-repair reasoning per spec, just not a Llama model, because none of
+that tier remained available). Lesson recorded in `llm_client.py`'s
+module docstring: trust `GET /v1/models`, not a docs page.
+
+**Smoke test** (`scratchpad/debug_driverquery.py`, run before any batch):
+one fragile rule (`proc_creation_win_driverquery_usage.yml`), one repair
+request, raw model response printed and inspected by hand before spending
+any further rate-limit budget. It returned `NO_LOGIC_REPAIR_POSSIBLE`
+rather than a fabricated rewrite — confirmed via the model's own captured
+`reasoning` field that this was a genuine (if debatable — see Part 3)
+judgement call, not a parsing failure, before proceeding.
+
+## Part 1 — the generator, tightly scoped (`mechanic/repair_generator.py`)
+
+Input: the fragile rule plus the mechanic's own fragility diagnosis
+(`build_diagnosis()` reuses `evasion.fragile_atoms_for_rule` directly — it
+does not re-derive fragility). Output: exactly one of a proposed Sigma
+YAML rewrite, or the explicit `NO_LOGIC_REPAIR_POSSIBLE` signal. The
+generator is never asked to assess its own repair's quality; `RepairDiagnosis`
+carries no field for a self-assessment, and `GeneratedRepair` carries no
+verdict field — only `proposed_rule_yaml`, `raw_model_text`, `model`,
+`endpoint`, `no_repair_signal`, and `parse_note`.
+
+**Anti-circularity boundary, enforced structurally, not just by prompt
+wording.** `build_diagnosis(rule_path)` takes exactly one parameter and
+has no code path that reads benign events, evasion variants, or gate
+results — those objects are never constructed anywhere upstream of a
+generation call. This is checked by inspection in Part 4 below, not just
+asserted here.
+
+Defensive parsing (`_extract_response`): a fenced YAML block wins over an
+incidental sentinel string appearing in prose; anything that is neither
+valid YAML nor the sentinel is a generation failure, reported as such, and
+never a crash or a silent skip.
+
+## Part 2 — three outcomes, gate-enforced, not LLM-asserted (`mechanic/repair_outcome.py`)
+
+`classify_repair()` implements the decision tree exactly as specified,
+never consulting the LLM's own opinion of its output:
+
+- **LOGIC_REPAIR** — the LLM proposed a rewrite, and the gate accepted it:
+  all applicable conditions pass **and** `gate.fully_exercised` is `True`.
+  The only success outcome.
+- **TELEMETRY_REPAIR** — the proposed rewrite references a field the
+  rule's own log source cannot provide, detected deterministically by
+  diffing the repair's referenced fields against the fields actually
+  observed for that rule (`verify.full_flat_event_from_evtx` — see the
+  narrow/wide fix below). Advice only; no rewrite is ever shipped, and
+  the LLM is never allowed to fabricate a rewrite keyed on a field outside
+  telemetry.
+- **RETIRE** — either the LLM itself signalled no repair is possible (this
+  is reported as a *distinct* reason string precisely because it rests on
+  the model's own claim, not an independent gate verdict), or the gate
+  rejected the rewrite, or — the R5 lesson from Phase 2, wired in from
+  the first commit — `gate.fully_exercised` came back `False` on an
+  IOC-tier rule with a nominal PASS. A PASS resting on fewer than all
+  applicable conditions is never reported as a repair here.
+- **GENERATION_FAILURE** — the model's output was neither valid YAML nor
+  the sentinel (bad YAML, an unparseable Sigma condition, an unsupported
+  modifier). Its own bookkeeping category, never folded into RETIRE.
+
+`gate.fully_exercised` gates acceptance unconditionally: a repair accepted
+on conditions 2-4 while condition 1 (`EVASIONS_CAUGHT`) was never
+exercised is not a LOGIC_REPAIR, regardless of tier.
+
+**Is LOGIC_REPAIR actually reachable, or vacuously impossible under this
+stricter policy?** `tests/test_repair_outcome.py` proves it is reachable
+with a hand-constructed repair keyed on a substring (`WebClient`)
+structurally immune to all five mechanical evasion techniques — and, in
+the same pass, proves that *none* of Phase 1/2's five original hand
+repairs would themselves qualify as LOGIC_REPAIR under this tier-blind,
+`fully_exercised`-gated policy (R1 and R5 both PASS-but-not-fully-exercised,
+so both correctly route to RETIRE here). This is an intentional
+tightening relative to Phase 1/2's own verdicts, not a regression.
+
+## Part 3 — the honest acceptance-rate run
+
+**Sample.** `scripts/sample_phase3_rules.py`, seeded (`SEED = 42`) and
+committed — not a pickle-only artefact. It builds per-tier pools from
+SigmaHQ's `regression_data/` corpus using the mechanic's own classifier,
+shuffles with `random.Random(seed)`, and validates every candidate has a
+usable EVTX fixture before accepting it. Scanning the full corpus found
+**202 candidates, 0 of them IOC-tier** — SigmaHQ's `regression_data/`
+simply contains zero IOC-tier rules with EVTX fixtures, a genuine
+corpus-availability finding, disclosed rather than papered over with a
+substitute source. Pools: 169 Artifact-scoreable, 24 Tool-scoreable, 9
+TTP-scoreable. Final sample (`data/phase3_sample_manifest.json`): **10
+Artifact, 10 Tool, 8 TTP = 28 rules** (TTP capped by its pool of 9).
+
+**Run.** Each of the 28 rules: one real LLM call
+(`mechanic.repair_generator.generate_repair`, no retries that could
+constitute a second attempt at the same rule), the proposed repair run
+through the *full* gate with condition-1 evasions supplied exclusively by
+Phase 2's deterministic transformer — never by the LLM — and the outcome
+classified per Part 2. Model: `openai/gpt-oss-120b`. Endpoint:
+`https://api.groq.com/openai/v1`.
+
+**Overall result — the finding this phase exists to produce, reported as
+measured, not tuned toward any target:**
+
+| Outcome | Count | Share |
+|---|---|---|
+| RETIRE | 24 | 85.7% |
+| GENERATION_FAILURE | 3 | 10.7% |
+| LOGIC_REPAIR | 1 | 3.6% |
+| TELEMETRY_REPAIR | 0 | 0% |
+
+**Acceptance rate: 1/28 = 3.6%.** `gate.fully_exercised` was `False` on
+13/28 (46%) — meaning nearly half the sample's gate verdicts, had they
+been PASS, would not have been trustworthy evidence of evasion
+resistance without this exact check, per the Phase 2 R1/R5 lesson.
+
+By tier:
+
+| Tier | RETIRE | GENERATION_FAILURE | LOGIC_REPAIR |
+|---|---|---|---|
+| Artifact (10) | 8 | 1 | 1 |
+| Tool (10) | 9 | 1 | 0 |
+| TTP (8) | 7 | 1 | 0 |
+
+Every rejection, by which condition failed (a rule can fail more than
+one):
+
+| Failed condition | Count |
+|---|---|
+| EVASIONS_CAUGHT | 4 |
+| ORIGINAL_STILL_CAUGHT | 5 |
+
+The remaining RETIREs (15 of 24) were not gate-*rejected* at all: 8 were
+the LLM's own `NO_LOGIC_REPAIR_POSSIBLE` signal (reported with a reason
+string distinct from a gate-confirmed RETIRE, precisely because it rests
+on the model's claim, not an independent verdict), and 7 were nominal
+gate PASSes routed to RETIRE solely because `fully_exercised` was `False`
+— the R5 policy, now exercised on real LLM output rather than a
+hand-picked case.
+
+**Generation failures (3/28), reported as their own category:**
+
+| Rule | Reason |
+|---|---|
+| `proc_creation_win_cmd_launched_with_hidden_start_flag.yml` | proposed rule used an unsupported Sigma modifier (`regex`) |
+| `proc_creation_win_renamed_ftp.yml` | proposed rule used an unsupported Sigma modifier (`notendswith`) |
+| `proc_creation_win_findstr_lsass.yml` | proposed rule's condition expression was not parseable (stray comma) |
+
+All three are the model producing syntactically-plausible-but-invalid
+Sigma, not the harness or gate misbehaving — defensive parsing caught
+every one and reported it as a generation failure rather than crashing or
+silently skipping the rule.
+
+**The one LOGIC_REPAIR, in full**, because a 3.6% acceptance rate should
+be inspectable, not just quoted:
+`proc_creation_win_bitsadmin_download.yml`'s fragile atoms were four
+literal command-line substrings (`/transfer`, `/create`, `/addfile`,
+`http`) — one per BITS subcommand. The model's proposed rewrite dropped
+subcommand-matching entirely and generalized to "bitsadmin.exe plus a
+URL in the command line" (`CommandLine|re: 'https?://'`), a genuinely more
+durable observable that does not depend on which BITS subcommand an
+attacker uses. All four gate conditions passed, `fully_exercised` was
+`True`: 2 mechanical evasions confirmed and both still caught
+(`EVASIONS_CAUGHT`), the rule's own known TP still fires
+(`ORIGINAL_STILL_CAUGHT`), no new false positives (`NO_NEW_FALSE_POSITIVES`),
+and logsource/ATT&CK tags unchanged (`INTENT_PRESERVED`). This is exactly
+the shape of repair the pipeline was built to find — and the sample found
+exactly one of them in 28 tries.
+
+**The narrow-vs-wide projection bug, found and fixed mid-run — reported
+because it changed a real result, not hidden.** The first complete run
+(`data/phase3_run_results_run1_narrow.json`) used
+`verify.flat_event_from_evtx`, which only resolves the *original* rule's
+own referenced fields when building the template event fed to the gate.
+That run produced 3 TELEMETRY_REPAIR outcomes — but inspecting one
+(`proc_creation_win_wmic_susp_process_creation.yml`, repaired to reference
+`Image`/`ParentImage`) against the real upstream SigmaHQ "Generic" WMIC
+rule showed those fields are legitimately available for that log source;
+the narrow projection just never tried to resolve them because the
+*original* rule never referenced them. This is a real
+measurement-validity bug, not a model or gate problem. Fixed by adding
+`verify.full_flat_event_from_evtx()` (a wide projection of every field
+RSigma observes for that record, proven a strict superset of the narrow
+one in `tests/test_wide_flat_event.py`) and re-running
+(`data/phase3_run_results_run2_wide.json`, the run reported above).
+
+| | Run 1 (narrow) | Run 2 (wide) |
+|---|---|---|
+| TELEMETRY_REPAIR | 3 | 0 |
+| RETIRE | 21 | 24 |
+| GENERATION_FAILURE | 3 | 3 |
+| LOGIC_REPAIR | 1 | 1 |
+| `fully_exercised` False | 11 | 13 |
+| Acceptance rate | 3.6% | 3.6% |
+
+All 3 reclassifications went TELEMETRY_REPAIR → RETIRE once the wider
+projection could actually check the referenced fields against real
+telemetry: 2 became nominal PASSes routed to RETIRE by
+`fully_exercised=False` (`registry_set_add_load_service_in_safe_mode.yml`,
+`proc_creation_win_svchost_masqueraded_execution.yml`), and 1
+(`proc_creation_win_wmic_susp_process_creation.yml`) actually ran the full
+gate and failed it (`EVASIONS_CAUGHT`, `ORIGINAL_STILL_CAUGHT`). The
+acceptance rate itself did not move — the single LOGIC_REPAIR case was
+unaffected by the fix either way — but the TELEMETRY_REPAIR count was
+entirely an artefact of the narrow projection, and reporting Run 1's
+number without this fix would have overstated a category that turned out
+to be empty.
+
+**Infrastructure difficulties encountered, disclosed because they shaped
+how this run was executed, not because they affect the result's
+validity.** This session's development machine exhibited unreliable
+networking over several hours of batch execution: genuine memory pressure
+early on (resolved by freeing RAM), a multi-hour sleep/wake gap
+(resolved by keeping the machine awake), and — the persistent issue —
+TCP connections to Groq's API observed stuck in `CLOSE_WAIT` well past
+Python's own configured `requests` timeout, which did not reliably fire
+on this machine regardless of how tightly it was set. The fix that
+actually worked: isolating each generation call in its own subprocess
+(`scripts/_generate_repair_worker.py`) invoked with an OS-level
+`subprocess.run(..., timeout=...)`, which terminates the child regardless
+of which syscall it is blocked in — a guarantee no in-process timeout
+gave on this machine. Combined with incremental per-rule result-writing
+(`_write_progress`, called after every single rule) and a resumable
+`--resume` flag, this meant no completed result was ever lost to a
+network stall or a process kill, only forward progress was occasionally
+slowed. This is a development-environment finding, not a finding about
+the repair-generation framework, and it does not affect any number
+reported above — every one of the 28 rules that reached a `RUN_ERROR`
+state during the run was cleared and re-attempted until it produced a
+real outcome; no rule's outcome was ever fabricated or skipped to work
+around a network stall.
+
+## Part 4 — independence audit
+
+Before the acceptance rate above is used for anything, the boundary
+between the LLM and its test data was audited by direct code inspection,
+the same way `docs/kappa-provenance.md` audited κ. Full audit:
+`docs/stage3-phase3-independence.md`. Summary of what it confirms:
+
+- `mechanic/repair_generator.py`'s only entry points into the generation
+  call (`build_diagnosis`, `build_prompt`, `generate_repair`) take a rule
+  path and, downstream, a `RepairDiagnosis` — a dataclass with no field
+  capable of carrying a benign event, an evasion variant, or a gate
+  result. No object of any of those three types is ever constructed
+  before a generation call runs, confirmed by tracing every caller of
+  `generate_repair` in `scripts/run_phase3_acceptance.py` and
+  `scripts/_generate_repair_worker.py`.
+- `mechanic/evasion.py`, `mechanic/gate.py`, `mechanic/verify.py`, and
+  `mechanic/synthetic_benign.py` — the modules that produce benign events,
+  evasion variants, and gate verdicts — contain zero references to
+  `llm_client`, `chat_completion`, or `requests.` anywhere in their
+  source. The condition-1 evasions used in every gate run in this phase
+  come from `evasion.generate_confirmed_evasions_for_rule` (Phase 2's
+  deterministic transformer); the repair LLM has no path to produce or
+  influence an evasion event.
+- The reverse direction was also checked: nothing the gate or verify
+  layer computes is fed back into a later generation call within a single
+  rule's run — each of the 28 rules gets exactly one generation call,
+  before any gate evidence for that rule exists.
+
+**Conclusion: the boundary holds, confirmed by inspection, not by
+intention.** The 3.6% acceptance rate above is reported as a trustworthy
+measurement of this generator against this gate, not an artefact of the
+LLM having seen — directly or indirectly — the data it was being tested
+against.
+
+### Reproducing this phase
+
+```
+export GROQ_API_KEY=...                          # never committed; see .env.example
+export MECHANIC_RSIGMA_BIN=/path/to/pinned/rsigma
+pytest tests/test_repair_outcome.py tests/test_llm_client_retry.py tests/test_wide_flat_event.py tests/test_synthetic_benign.py -v
+python scripts/sample_phase3_rules.py                 # regenerates data/phase3_sample_manifest.json (seed=42)
+python scripts/run_phase3_acceptance.py --out data/phase3_run_results.json
+```
+
+Full suite (174 tests, including all pre-existing Stage 1/2/3 tests): all
+pass, no regressions.
+
+See `docs/stage3-phase3-status.md` for the honest go/no-go assessment this
+phase's results support, and `docs/stage3-phase3-independence.md` for the
+full independence audit.
+

@@ -106,6 +106,12 @@ class GeneratedRepair:
     endpoint: str
     no_repair_signal: bool = False
     parse_note: Optional[str] = None
+    # Populated only for reasoning models that expose a separate chain-of-
+    # thought field (Groq's gpt-oss family does) - never used by any
+    # decision logic anywhere in this pipeline, purely qualitative
+    # reporting value (e.g. explaining WHY a model declined a case that
+    # turned out to have a real repair - see docs/stage3-phase3-status.md).
+    raw_reasoning: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -115,6 +121,7 @@ class GeneratedRepair:
             "endpoint": self.endpoint,
             "no_repair_signal": self.no_repair_signal,
             "parse_note": self.parse_note,
+            "raw_reasoning": self.raw_reasoning,
         }
 
 
@@ -196,7 +203,7 @@ def generate_repair(
     base_url: Optional[str] = None,
     api_key_env: str = llm_client.API_KEY_ENV,
     temperature: float = 0.2,
-    max_tokens: int = 2000,
+    max_tokens: int = 4000,
 ) -> GeneratedRepair:
     """The one and only LLM call in this entire pipeline. Takes a rule
     path, nothing else - see module docstring for why that's the whole
@@ -210,6 +217,11 @@ def generate_repair(
         messages, model=model, base_url=base_url, api_key_env=api_key_env, temperature=temperature, max_tokens=max_tokens
     )
     proposed, no_repair, note = _extract_response(response.text)
+    raw_reasoning = None
+    try:
+        raw_reasoning = response.raw["choices"][0]["message"].get("reasoning")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        pass  # not a reasoning model / unexpected shape - purely cosmetic, never fatal
     return GeneratedRepair(
         proposed_rule_yaml=proposed,
         raw_model_text=response.text,
@@ -217,4 +229,5 @@ def generate_repair(
         endpoint=response.endpoint,
         no_repair_signal=no_repair,
         parse_note=note,
+        raw_reasoning=raw_reasoning,
     )

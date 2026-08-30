@@ -818,6 +818,68 @@ def flat_event_from_evtx(
     return {field_name: _extract_by_dotted_path(full_event, path) for field_name, path in discovery.mapping.items()}
 
 
+def full_flat_event_from_evtx(
+    rule_path: Union[str, Path], evtx_path: Union[str, Path], *, rsigma_bin: Optional[Union[str, Path]] = None, tmp_dir: Optional[Path] = None
+) -> dict[str, Any]:
+    """Like `flat_event_from_evtx`, but keyed by EVERY last-path-segment
+    name RSigma observed in the event (via the same dry `--observe-fields`
+    pass `_discover_pipeline` already runs), not just the fields the
+    RULE PASSED IN happens to reference.
+
+    Found necessary during Stage 3 Phase 3's first stratified run: a repair
+    proposing a field the ORIGINAL rule never referenced (e.g. adding
+    `ParentImage` to a rule whose only fragile atom was `CommandLine`) was
+    being routed to TELEMETRY_REPAIR purely because
+    `flat_event_from_evtx`'s narrow per-rule projection had never even
+    attempted to resolve that field - not because the field is actually
+    absent from the event's real schema. See
+    docs/stage3-phase3-status.md for the concrete case (a WMIC-recon
+    repair correctly proposing ParentImage/Image - fields that genuinely
+    exist in this exact record - that a narrow projection had no way to
+    confirm).
+
+    `rule_path` is still required (RSigma's CLI needs SOME rule to run
+    `engine eval` against, and it must be one that fires on this file -
+    same requirement as `flat_event_from_evtx`) but its own field list
+    does NOT limit what comes back - every last-segment name RSigma
+    reports as `unknown` (a real, observed, unmapped path) in the dry pass
+    is included. Ambiguous last-segments use the same EventData-then-
+    System tie-break `_discover_pipeline` already applies elsewhere - this
+    is a best-effort WIDE projection for checking a not-yet-known field
+    name's availability, not a claim every field resolves unambiguously.
+
+    Raises VerifyError under the same conditions as `flat_event_from_evtx`
+    (no firing record, or more than one)."""
+    rule_path = Path(rule_path)
+    evtx_path = Path(evtx_path)
+    resolved_bin = find_rsigma_binary(rsigma_bin)
+
+    with _tmp_dir(tmp_dir) as td:
+        report = _observe_fields(resolved_bin, rule_path, evtx_path, None, td / "wide_discover_fields.json")
+        observed_paths = [u["field"] for u in report.get("unknown", [])]
+        all_last_segments = sorted({_match_key(p) for p in observed_paths})
+        discovery = _discover_pipeline(resolved_bin, rule_path, evtx_path, all_last_segments, td)
+
+        pipeline_path = td / "wide_flat_event_pipeline.yml"
+        pipeline_path.write_text(
+            yaml.safe_dump(discovery.to_pipeline_dict("mechanic wide flat-event projection"), sort_keys=False),
+            encoding="utf-8",
+        )
+        args = [
+            "engine", "eval", "-r", str(rule_path), "-p", str(pipeline_path),
+            "-e", f"@{evtx_path}", "--include-event", "--match-detail", "off", "--output-format", "json",
+        ]
+        proc = _run(resolved_bin, args)
+        matched = _parse_matched_lines(proc.stdout)
+
+    if not matched:
+        raise VerifyError(f"{rule_path} does not fire on any record in {evtx_path} - no known-positive record to project.")
+    if len(matched) > 1:
+        raise VerifyError(f"{rule_path} fires on {len(matched)} record(s) in {evtx_path} - ambiguous which is the declared true positive.")
+    full_event = matched[0].get("event", {})
+    return {name: _extract_by_dotted_path(full_event, path) for name, path in discovery.mapping.items()}
+
+
 # ---------------------------------------------------------------------------
 # Public entrypoint
 # ---------------------------------------------------------------------------
