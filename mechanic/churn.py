@@ -368,11 +368,21 @@ def _modified_files_no_patch(commit: Commit, root: Path) -> list[_FallbackModifi
         return _git_diff_via_subprocess(root, ["--root", c.hexsha])
 
 
-def _mine_commits(root: Path, fmt: RuleFormat, subdir_prefix: Optional[str] = None) -> list[_CommitFacts]:
+def _mine_commits(
+    root: Path, fmt: RuleFormat, subdir_prefix: Optional[str] = None, single: Optional[str] = None
+) -> list[_CommitFacts]:
+    """`single`, if given (a commit hash), mines exactly that one commit
+    instead of walking the whole history - PyDriller's own `Repository(...,
+    single=...)` targets one commit without a full traversal, so this stays
+    fast even on a huge repo. Used by the Part 4 hardening regression-lock
+    test (tests/test_validated_numbers_lock.py) to re-check a specific
+    historical mechanical commit's rule-file-touch count without re-mining
+    all of SigmaHQ/Elastic/Splunk's history just to check one commit."""
     extensions = _rule_extensions(fmt)
     exclude_dirs = fmt.exclude_dirs
     facts: list[_CommitFacts] = []
-    for commit in Repository(str(root)).traverse_commits():
+    repo_kwargs = {"single": single} if single else {}
+    for commit in Repository(str(root), **repo_kwargs).traverse_commits():
         touched: list[str] = []
         renames: list[tuple[str, str]] = []
         file_changes: list[FileChangeFact] = []

@@ -16,7 +16,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+# scipy/numpy are needed only by tests/test_validated_numbers_lock.py (the
+# STP rank-correlation regression lock, Part 4 of the core hardening pass)
+# - test tooling, not a runtime dependency of the core or the experiment.
+# That one test module skips itself (pytest.importorskip) if they're absent.
+dev = ["pytest>=7.0", "scipy>=1.11", "numpy>=1.26"]
 # Stage 3 EXPERIMENT only (repair-verification harness + LLM repair
 # generator) - see docs/core-vs-experiment.md. The core product
 # (scan/staleness/triage/explain) does not need requests and has no network
