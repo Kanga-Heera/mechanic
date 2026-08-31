@@ -1,12 +1,37 @@
 # mechanic
 
-Detection rule maintenance triage — Stage 1 of 3.
+Detection rule maintenance triage.
 
-This stage builds infrastructure only: a fault-isolated Sigma rule loader, a
-git-driven staleness/organic-churn report, and a syntax-independent rule AST.
-It does **not** score rule quality, judge ATT&CK coverage, generate evasions,
-or repair anything — those depend on unread literature and unsettled findings
-from later stages, and are explicitly out of scope here.
+**Status, plainly, no spin:** the CORE product — a fault-isolated Sigma/
+Elastic/Splunk rule loader, a git-driven behavioral staleness engine, and a
+structural fragility classifier externally validated against MITRE Center
+for Threat-Informed Defense's Summiting the Pyramid methodology (Kendall's
+tau-b = 0.361, p = 0.0010 against MITRE's own human-expert-scored analytics
+— see `RESULTS.md`) — is a finished, production-hardened rule-triage tool
+that fills a gap nothing else in the space fills: alert triage is a crowded
+field, but *rule* triage (telling an engineer which detection rules are
+fragile and/or stale and therefore need attention first, at repository
+scale) is not. It runs `scan`/`staleness`/`triage`/`explain` with zero
+dependency on RSigma, zero network access, and no API key, enforced by a
+test (`docs/core-vs-experiment.md`, `tests/test_core_isolation.py`) — see
+`QUICKSTART.md` for five real commands against a real SigmaHQ checkout. A
+separate, later Stage 3 experiment asked whether a fragile rule can be
+*repaired* automatically and verified by a real detection engine rather than
+an LLM's own say-so; that experiment is complete and its honestly-measured
+result (a 3.6% acceptance rate, 1 of 28 sampled rules, independence-audited
+— see `RESULTS.md`'s Stage 3 Phase 3 section) is a real finding worth
+keeping, but it is **not** part of the core product, is not required for
+anything above, and is quarantined into its own module tree and its own
+`mechanic-repair` CLI so its presence, correctness, or failure can never
+affect the core's reliability.
+
+This project was originally scoped and built in three stages; the sections
+below still describe Stage 1's infrastructure (loader, staleness, AST) in
+detail, with Stage 2's fragility classifier and Stage 3's repair experiment
+covered in `RESULTS.md` and the `docs/` status documents. It does **not**
+judge ATT&CK coverage or claim to catch every possible evasion — see
+`RESULTS.md` for every disclosed limitation, not just the ones repeated
+here.
 
 ## Why this exists
 
@@ -401,12 +426,20 @@ detection-engineering-quality problem (linting, evasion generation/testing,
 automated repair, rule generation, mutation testing) rather than STP's and
 mechanic's shared target of scoring robustness itself.
 
-## Deferred (not built, designed to slot in later)
+## Stage 3 (built, but NOT part of the core - see status note at the top)
 
-- **zircolite** — Stage 3's offline EVTX/JSON verification harness. No rule
-  matching engine exists in this codebase; nothing here should need to
-  change to plug zircolite in later.
-- **EVTX-ATTACK-SAMPLES** — Stage 3's log corpus.
+At the time this section was originally written, Stage 3's verification
+harness was still deferred, pending a choice of matching engine (zircolite
+was the leading candidate). It has since been built - `docs/stage3-harness-
+evaluation.md` documents the actual investigation and decision, which
+landed on **RSigma** instead, not zircolite. The harness, gate, evasion
+transformer, and LLM repair generator all exist now
+(`mechanic/verify.py`, `mechanic/gate.py`, `mechanic/evasion.py`,
+`mechanic/repair_generator.py`, run via the separate `mechanic-repair` CLI)
+and are complete, with an honest, disclosed result (RESULTS.md's Stage 3
+Phase 3 section). None of it is part of the core described above, by
+design - see `docs/core-vs-experiment.md` for the boundary and how it's
+enforced.
 
 ## Explicitly out of scope for this stage
 

@@ -2795,3 +2795,89 @@ See `docs/stage3-phase3-status.md` for the honest go/no-go assessment this
 phase's results support, and `docs/stage3-phase3-independence.md` for the
 full independence audit.
 
+---
+
+# Core hardening pass: separating, proving, and locking the reactor core
+
+Everything above this section is Stage 1 through Stage 3 Phase 3, unchanged
+by this pass - no validated result, committed number, or STP validation was
+recomputed or adjusted. This section documents a subsequent, separate
+robustness/polish pass over the CORE (loader, staleness, fragility
+classifier, triage/explain) specifically, requested once the project's
+scope had shifted: rule triage is the product; the Stage 3 repair
+generator is a completed, honestly-measured experiment that must never be
+able to affect the core's reliability or its story. Full go/no-go
+narrative: `docs/core-hardening-status.md`. Summary here, by part:
+
+**Part 0 - separate core from experiment.** `mechanic/cli.py` had exactly
+one dependency on the repair pipeline (`from mechanic import verify`),
+used by the `verify` subcommand - every other core module already had
+zero cross-dependency, confirmed by grep. Moved `verify` to its own file
+and console script (`mechanic-repair`); moved `requests` out of the core's
+`dependencies` into an optional `repair` extra. Enforced, not just
+claimed, by `tests/test_core_isolation.py` (fresh-subprocess import-graph
+check plus an end-to-end run of every core command with `GROQ_API_KEY`
+and `MECHANIC_RSIGMA_BIN` both unset).
+
+**Part 1 - adversarial-input robustness.** Built a fixture set covering
+every case in the hardening brief (empty/comments-only/bare-marker files,
+non-YAML/binary junk, truncated YAML, non-mapping documents, all-null
+fields, no detection block, a 10MB junk file, a UTF-8 BOM, CRLF, an empty
+directory, a symlink/junction loop, a file vanishing mid-scan, a
+10,000-rule directory). Found and fixed two real bugs: a file yielding
+zero YAML documents previously vanished from every count (now flagged
+`empty_or_no_documents`); the file walker had no real symlink-loop
+protection, reproduced with an actual Windows junction loop (32 duplicate
+hits before the fix, 1 correct hit after). Everything else was already
+correct, now locked with `tests/test_loader_adversarial.py`.
+
+**Part 2 - output trustworthiness/readability.** Found and fixed a real
+bug: `churn.mine_commits_cached`'s cache-status messages were printed to
+stdout, corrupting `triage --json`/`explain --json` on any cache miss -
+moved to stderr. Added the one-line `"N rules, X fragile, Y stale, Z need
+attention"` summary, a "why (driving observable)" column on `triage`'s
+ranked table, a visible legend for the text-path confidence caveat, and
+`triage`/`explain` `--json` schema documentation in README.md. Locked with
+`tests/test_cli.py` (real CLI, `click.testing.CliRunner`, not just
+`priority.py`'s internals) - including a test that no blended/combined
+score field exists anywhere, since Task 7 already found no statistical
+basis to fuse the two axes.
+
+**Part 3 - real end-to-end proof.** `QUICKSTART.md`: `scan` -> `staleness`
+-> `triage` -> `explain`, against a real, pinned SigmaHQ checkout
+(`da9bb07d642a2826e89702445d32c795209ec108`, `rules/`, 3,144 files), every
+command's real output reproduced verbatim from a clean install. Honest
+finding disclosed there: a full-corpus `staleness`/`triage`/`explain` run
+on SigmaHQ takes several minutes wall-clock even from a warm git-mining
+cache (the semantic-diff and per-rule fragility passes do real work per
+rule) - pre-existing behavior, not a regression, disclosed rather than
+hidden.
+
+**Part 4 - regression-lock the validated numbers.** The STP correlation
+(tau-b 0.361, rho 0.392, mapped kappa 0.316, n=72) is locked against a new
+frozen, self-contained fixture (`tests/fixtures/stp_validation_frozen.json`)
+that re-runs mechanic's real, current classifier against 72 real rules'
+text captured at their exact MITRE-scored commits - no external clone
+needed to run this test going forward. The three mechanical-commit figures
+(SigmaHQ 2,931, Elastic 1,064, Splunk 2,068 files) are locked via
+single-commit mining (`churn._mine_commits(..., single=<hash>)`, a new,
+safe, additive parameter) against the exact pinned commit hashes. The
+staleness reproduction *percentages* are deliberately NOT bit-locked
+(RESULTS.md itself documents them as wall-clock-relative against live
+external repos) - the mechanism producing them is already locked
+deterministically in `tests/test_churn.py`.
+
+**Part 5 - honest status.** This section, `docs/core-hardening-status.md`,
+and a rewritten top-of-README status paragraph stating the core/experiment
+split plainly, with no spin, in one place.
+
+### Reproducing this pass
+
+```
+pytest tests/test_core_isolation.py tests/test_loader_adversarial.py tests/test_cli.py tests/test_validated_numbers_lock.py -v
+```
+
+Full suite (235 tests, up from 174 before this pass - 61 new tests across
+the four files above): 198 pass, 37 skipped (unchanged skip set - the
+experiment's own RSigma/API-key-gated tests).
+
