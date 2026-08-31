@@ -163,16 +163,25 @@ def _render_staleness_report(report: churn.StalenessReport, top_n: int) -> None:
     console.print(stalest)
 
 
-def _render_rule_signal_row(r: priority.RuleSignals) -> tuple[str, str, str, str, str, str]:
+def _render_rule_signal_row(r: priority.RuleSignals) -> tuple[str, str, str, str, str, str, str]:
     tier = r.fragility.tier or "-"
     conf = r.fragility.confidence + ("*" if r.fragility.caveat else "")
     staleness = "NEVER REVISED" if r.never_revised else f"{r.days_since_behavioral_change}d since behavioral change"
     hyps = ", ".join(r.triage_hypotheses) if r.triage_hypotheses else "-"
-    return (r.file, tier, conf, staleness, str(r.age_days) if r.age_days is not None else "-", hyps)
+    return (
+        r.file,
+        tier,
+        conf,
+        r.short_reason,
+        staleness,
+        str(r.age_days) if r.age_days is not None else "-",
+        hyps,
+    )
 
 
 def _render_triage_report(report: priority.TriageReport, top_n: int, ordering: str = "tier_first") -> None:
     console.print(f"[bold]mechanic triage — {report.root}[/bold]")
+    console.print(f"[bold cyan]{report.one_line_summary()}[/bold cyan]")
     console.print(report.disclosure, style="yellow")
 
     summary = Table(title="Summary")
@@ -188,16 +197,26 @@ def _render_triage_report(report: priority.TriageReport, top_n: int, ordering: s
     ordering_label = (
         "fragility tier first, then staleness" if ordering == "tier_first" else "staleness first, then fragility tier"
     )
-    t = Table(title=f"Top {top_n}, sorted for review ({ordering_label} — not a combined score)")
+    t = Table(title=f"Top {top_n}, sorted for review, worst first ({ordering_label} — not a combined score)")
     t.add_column("file", overflow="fold")
     t.add_column("tier")
-    t.add_column("tier confidence")
+    t.add_column("tier conf.")
+    t.add_column("why (driving observable)", overflow="fold")
     t.add_column("behavioral staleness")
     t.add_column("age (days)", justify="right")
     t.add_column("triage hypotheses (unverified)", overflow="fold")
-    for r in report.sorted_scoreable(ordering=ordering)[:top_n]:
+    rows = report.sorted_scoreable(ordering=ordering)[:top_n]
+    for r in rows:
         t.add_row(*_render_rule_signal_row(r))
     console.print(t)
+    if any(r.fragility.caveat for r in rows):
+        console.print(
+            "[yellow]* tier confidence marked with an asterisk comes from the TEXT-ONLY path "
+            "(Elastic/Splunk, no AST) — computed WITHOUT the AND/OR combination correction that "
+            "external validation against MITRE STP showed necessary. Treat these tiers as less "
+            "trustworthy than an unmarked (Sigma/AST) tier; see `mechanic explain <file>` for the "
+            "full caveat on any individual row.[/yellow]"
+        )
 
     if report.unscoreable:
         u = Table(title=f"Unscoreable ({len(report.unscoreable)}) — no tier assigned, never defaulted")

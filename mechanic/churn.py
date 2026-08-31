@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pickle
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -591,8 +592,12 @@ def mine_commits_cached(
     stale facts. `refresh=True` forces re-mining regardless of cache state.
 
     Every path (hit, miss - no cache, miss - stale, refresh) prints an
-    explicit one-line message, so a fast cached run is never mistaken for a
-    fresh mining run or vice versa.
+    explicit one-line message to STDERR (never stdout - `mechanic triage
+    --json`/`explain --json` must stay pure JSON on stdout for anyone
+    piping it to `jq` or another program; this was a real bug, found and
+    fixed during the Part 2 hardening pass: these messages used to go to
+    stdout and would corrupt --json output on every cache miss), so a fast
+    cached run is never mistaken for a fresh mining run or vice versa.
     """
     root = Path(root)
     _check_git_preconditions(root)
@@ -600,18 +605,19 @@ def mine_commits_cached(
     cache_file = _cache_path(root, fmt, subdir)
 
     if refresh:
-        print(f"[mechanic] cache SKIPPED (--refresh): re-mining {root} (fmt={fmt}, subdir={subdir}).", flush=True)
+        print(f"[mechanic] cache SKIPPED (--refresh): re-mining {root} (fmt={fmt}, subdir={subdir}).", file=sys.stderr, flush=True)
     elif cache_file.exists():
         cached_head, cached_facts = None, None
         try:
             with open(cache_file, "rb") as f:
                 cached_head, cached_facts = pickle.load(f)
         except Exception as e:
-            print(f"[mechanic] cache UNREADABLE ({e}) - re-mining.", flush=True)
+            print(f"[mechanic] cache UNREADABLE ({e}) - re-mining.", file=sys.stderr, flush=True)
         if cached_facts is not None and cached_head == head:
             print(
                 f"[mechanic] cache HIT: {len(cached_facts)} commit-facts for {root} "
                 f"(fmt={fmt}, subdir={subdir}) at HEAD={head[:10]} - reusing, no mining performed.",
+                file=sys.stderr,
                 flush=True,
             )
             return cached_facts
@@ -619,15 +625,16 @@ def mine_commits_cached(
             print(
                 f"[mechanic] cache MISS (stale): cached HEAD={cached_head[:10] if cached_head else '?'} "
                 f"!= current HEAD={head[:10]} - repo has moved, re-mining.",
+                file=sys.stderr,
                 flush=True,
             )
     else:
-        print(f"[mechanic] cache MISS (none found): mining {root} (fmt={fmt}, subdir={subdir}).", flush=True)
+        print(f"[mechanic] cache MISS (none found): mining {root} (fmt={fmt}, subdir={subdir}).", file=sys.stderr, flush=True)
 
     all_facts = mine_commits(root, fmt, subdir=subdir)
     with open(cache_file, "wb") as f:
         pickle.dump((head, all_facts), f)
-    print(f"[mechanic] mined and cached {len(all_facts)} commit-facts at HEAD={head[:10]} -> {cache_file}", flush=True)
+    print(f"[mechanic] mined and cached {len(all_facts)} commit-facts at HEAD={head[:10]} -> {cache_file}", file=sys.stderr, flush=True)
     return all_facts
 
 

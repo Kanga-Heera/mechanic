@@ -310,20 +310,64 @@ class RuleSignals:
         sentences.append("Review this - none of the above is a verdict that the rule is broken.")
         return " ".join(sentences)
 
+    @property
+    def short_reason(self) -> str:
+        """One line, not a paragraph: the specific thing that earned this
+        rule its spot in the ranked `triage` table, so an engineer scanning
+        the list doesn't have to run `explain` on every row just to find
+        out why it's there. Same underlying signal `narrative` uses (the
+        driving atom, or a structural finding, or the unscoreable reason)
+        condensed to fit a table column."""
+        f = self.fragility
+        if f.unscoreable:
+            reason = f.unscoreable_reason or "could not be scored"
+            return reason if len(reason) <= 70 else reason[:67] + "..."
+        if f.structural_findings:
+            return f"structural: {', '.join(f.structural_findings)}"
+        driving = [a for a in f.atoms if a.get("tier") == f.tier]
+        driving.sort(key=lambda a: 1 if "excluded" in (a.get("reason") or "") else 0)
+        shown = driving[:1] or f.atoms[:1]
+        if shown:
+            a = shown[0]
+            label = f"{a.get('field')}={a.get('value')!r}"
+            return label if len(label) <= 70 else label[:67] + "..."
+        return f"tier {f.tier}" if f.tier else "no driving atom identified"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "file": self.file,
             "narrative": self.narrative,
+            "short_reason": self.short_reason,
             "staleness": {
                 "behavioral_commit_count": self.behavioral_commit_count,
                 "never_revised": self.never_revised,
                 "days_since_behavioral_change": self.days_since_behavioral_change,
                 "age_days": self.age_days,
                 "classification_confidence": self.staleness_classification_confidence,
+                "is_stale": _is_stale(self),
             },
             "fragility": self.fragility.to_dict(),
+            "is_fragile": _is_fragile(self),
+            "needs_attention": _is_fragile(self) and _is_stale(self),
             "triage_hypotheses": self.triage_hypotheses,
         }
+
+
+def _is_stale(sig: RuleSignals) -> bool:
+    """Same threshold (`churn.STALE_DAYS`, 730 days / 2yr) and the same
+    "> 2yr since the relevant last-touch date" shape as churn.py's own
+    validated `pct_stale_over_2yr` metric (RESULTS.md) - applied here to
+    the triage-enriched *behavioral* staleness field rather than raw
+    organic-commit staleness, since that is the field triage/explain
+    already show. This does not recompute or redefine the locked metric;
+    it reuses its threshold at the per-rule level for the one-line
+    summary and the `--json` `needs_attention` flag."""
+    days = sig.age_days if sig.never_revised else sig.days_since_behavioral_change
+    return days is not None and days > churn.STALE_DAYS
+
+
+def _is_fragile(sig: RuleSignals) -> bool:
+    return sig.fragility.tier in FRAGILE_TIERS
 
 
 @dataclass
@@ -335,6 +379,21 @@ class TriageReport:
     scoreable: list[RuleSignals]
     unscoreable: list[RuleSignals]
     disclosure: str
+
+    def one_line_summary(self) -> str:
+        """"N rules, X fragile, Y stale, Z need attention (fragile AND
+        stale)" - the single line meant to be readable by someone who has
+        never opened this repo's docs. Counted over ALL discovered rules
+        (scoreable + unscoreable); unscoreable rules can still be "stale"
+        (staleness doesn't depend on fragility having succeeded) but are
+        never "fragile" (no tier was assigned, on purpose - never
+        defaulted) and so never count toward "need attention" either."""
+        all_rules = self.scoreable + self.unscoreable
+        n = len(all_rules)
+        fragile = sum(1 for r in all_rules if _is_fragile(r))
+        stale = sum(1 for r in all_rules if _is_stale(r))
+        need_attention = sum(1 for r in all_rules if _is_fragile(r) and _is_stale(r))
+        return f"{n} rules, {fragile} fragile, {stale} stale, {need_attention} need attention (fragile AND stale)"
 
     def bucket_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -392,6 +451,7 @@ class TriageReport:
             "rule_count": self.rule_count,
             "scoreable_count": len(self.scoreable),
             "unscoreable_count": len(self.unscoreable),
+            "summary": self.one_line_summary(),
             "bucket_counts": self.bucket_counts(),
             "disclosure": self.disclosure,
             "rules": [r.to_dict() for r in ordered],

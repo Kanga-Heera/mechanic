@@ -334,6 +334,47 @@ Node shapes under `conditions`:
 - `{"node": "selection", "name": "...", "kind": "selection"|"filter", "negated": bool, "child": node}`
 - `{"node": "leaf", "kind": "field_value"|"keyword"|"field_null"|"keyword_null", "field": "...", "operators": ["contains", ...], "value": ..., "negated": bool}`
 
+`triage --json`:
+
+```jsonc
+{
+  "root": "...", "fmt": "sigma", "mechanical_threshold": 0.10, "ordering": "tier_first",
+  "rule_count": 0, "scoreable_count": 0, "unscoreable_count": 0,
+  "summary": "N rules, X fragile, Y stale, Z need attention (fragile AND stale)",
+  "bucket_counts": {"likely-repairable": 0, "likely-needs-telemetry-check": 0, "likely-retire": 0},
+  "disclosure": "...",  // the no-combined-score disclosure, always present, never omit when displaying this data
+  "rules": [ /* scoreable rules, sorted per `ordering` - shape below */ ],
+  "unscoreable": [ /* same shape, tier/fragility fields null/empty, unscoreable_reason set */ ]
+}
+```
+
+Each entry in `rules`/`unscoreable` (also the shape `explain --json` returns for one rule):
+
+```jsonc
+{
+  "file": "...",
+  "narrative": "...",       // full prose - what `explain` prints first
+  "short_reason": "...",    // one line - the specific driving observable, what `triage`'s table shows
+  "staleness": {
+    "behavioral_commit_count": 0, "never_revised": false,
+    "days_since_behavioral_change": 0, "age_days": 0,
+    "classification_confidence": "high|medium|low|null",
+    "is_stale": false        // same 730-day (2yr) threshold as staleness's own pct_stale_over_2yr
+  },
+  "fragility": {
+    "tier": "IOC|Artifact|Tool|TTP|null", "confidence": "high|medium|low",
+    "and_or_corrected": true, "unscoreable": false, "unscoreable_reason": null,
+    "structural_findings": [], "structural_detail": {}, "atoms": [{"field": "...", "value": "...", "tier": "...", "reason": "..."}],
+    "caveat": null  // non-null ONLY for the text-only (Elastic/Splunk) path - always check this before trusting a tier at face value
+  },
+  "is_fragile": false,       // tier in {IOC, Artifact, Tool}
+  "needs_attention": false,  // is_fragile AND staleness.is_stale
+  "triage_hypotheses": []    // UNTESTED Stage 3 labels - never a verdict, see disclosure
+}
+```
+
+**The `fragility.caveat` field is the machine-readable form of the text-path confidence warning** - any consumer building automation on top of `--json` output must check it before treating a `tier` as high-confidence; it is non-null precisely (and only) when the tier came from the Elastic/Splunk text-only path rather than a Sigma AST walk.
+
 `report --json` is `{"scan": <scan output + validate_failures>, "staleness": <staleness output or null>, "staleness_error": "..." or null}`.
 
 ## Prior art
