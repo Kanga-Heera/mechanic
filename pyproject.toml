@@ -13,14 +13,21 @@ dependencies = [
     "rich>=13.0",
     "rich-click>=1.7",
     "pyyaml>=6.0",
-    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# Stage 3 EXPERIMENT only (repair-verification harness + LLM repair
+# generator) - see docs/core-vs-experiment.md. The core product
+# (scan/staleness/triage/explain) does not need requests and has no network
+# dependency at all; only mechanic-repair (mechanic/cli_repair.py) and the
+# mechanic.llm_client/verify/gate/evasion/repair_generator/repair_outcome/
+# synthetic_benign modules use this.
+repair = ["requests>=2.31"]
 
 [project.scripts]
 mechanic = "mechanic.cli:main"
+mechanic-repair = "mechanic.cli_repair:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
