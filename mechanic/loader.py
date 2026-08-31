@@ -176,6 +176,31 @@ def parse_text(
         )
         return rules, failures
 
+    if not any(doc is not None for doc in docs):
+        # An empty file, a file containing only comments/whitespace, or a
+        # bare `---` document marker all parse *successfully* as "zero (or
+        # all-None) documents" - PyYAML raises nothing. Left unflagged, a
+        # file like this simply vanishes from every count (not in files_ok,
+        # not in files_failed) - scanned - ok - failed stops summing to
+        # zero, and an engineer has no way to tell "this file legitimately
+        # has nothing in it" from "this file was silently skipped." Flagged
+        # here instead, once per file, so every scanned file is accounted
+        # for in exactly one bucket.
+        failures.append(
+            FailureRecord(
+                file=file_str,
+                stage="yaml_parse",
+                category="empty_or_no_documents",
+                exception_type="EmptyDocument",
+                message="File parsed as valid YAML but contains no rule document "
+                "(empty file, comments/whitespace only, or a bare '---' marker).",
+                fix_hint="Confirm this file is supposed to be empty. If it isn't, "
+                "the rule content may have been accidentally truncated or never "
+                "written.",
+            )
+        )
+        return rules, failures
+
     for doc in docs:
         if doc is None:
             continue
