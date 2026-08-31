@@ -47,8 +47,8 @@ either `status="trusted"` (both field presence AND expected-event-count are
 independently confirmed) or `status="unverifiable"` (loud, with the
 specific reason) - a plain boolean fire/no-fire is never handed back
 without one of those two labels attached. Callers (mechanic/gate.py, the
-`mechanic verify` CLI command) must never treat "unverifiable" as either a
-pass or a fail.
+`mechanic-repair verify` CLI command) must never treat "unverifiable" as
+either a pass or a fail.
 
 Stage 3 Phase 2, Part 3 added multi-record EVTX per-record accounting
 (previously: any file with more than 1 record came back as a single

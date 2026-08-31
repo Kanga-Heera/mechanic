@@ -1,4 +1,4 @@
-"""EXPERIMENT CLI - Stage 3 repair-verification harness (`mechanic verify`).
+"""EXPERIMENT CLI - Stage 3 repair-verification harness (`mechanic-repair verify`).
 
 Quarantined from `mechanic/cli.py` (the CORE CLI) per
 `docs/core-vs-experiment.md`: the reactor core (`scan`/`staleness`/`triage`/
