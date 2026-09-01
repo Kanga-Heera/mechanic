@@ -23,6 +23,16 @@ mechanic gui
                                        `mechanic triage --json` prints
        - GET  /api/jobs/{id}/rule  one rule's .to_dict(), looked up in the
                                     already-computed report (no recompute)
+       - GET  /api/jobs/{id}/rule-source   the rule file's raw content,
+                                    verbatim, confined to the loaded
+                                    repository root (no analysis - a file
+                                    read, same trust model as the CLI)
+       - GET  /api/jobs/{id}/rule-history  every mined commit that touched
+                                    this file (under any past rename),
+                                    filtered from the SAME all_facts the
+                                    report was built from - not re-mined,
+                                    not a new analysis, just a per-file
+                                    projection of already-mined facts
        - GET  /api/priority-legend    priority.priority_matrix_schema()
   -> mechanic/gui/static/{index.html,style.css,app.js}
        a single-page vanilla-JS frontend (no build step, no framework, no
@@ -103,10 +113,39 @@ same file that added the GUI.
 Dark, calm, restrained - `mechanic/gui/static/style.css`'s header comment
 states the palette (`--bg-base` near-black, `--bg-panel`/`--bg-panel-
 raised` layered dark blue, `--accent`/`--accent-bright` for interactive
-emphasis). Priority is never color-only: every badge carries the label
-text, the `tier×band` axis pair, and a distinct border/background per
-label - a colour-blind viewer reading only the text still gets the same
-information a sighted-for-hue viewer gets from the colour.
+emphasis). Priority is never color-only: every badge carries a small
+colour dot, the label text, and the `tier×band` axis pair - a
+colour-blind viewer reading only the text still gets the same information
+a sighted-for-hue viewer gets from the colour.
+
+**The status (priority) colour ramp was run through the `dataviz` skill's
+`validate_palette.js`** against this exact dark surface, not eyeballed -
+categorical/CVD-separation mode, since CRITICAL/HIGH/MEDIUM/LOW are four
+distinct states, not a magnitude ramp. It adopts the skill's own reference
+status palette (good/warning/serious/critical); CVD separation passes
+outright (worst adjacent pair ΔE 11.3, clearing the 8 floor), while the
+strict "normal-vision, no-label" floor (>=15 ΔE) lands at 13.6 on the
+tightest pair - a wide sweep of alternate red/orange/yellow/green
+combinations (recorded in `style.css`'s own comment on the ramp) found
+nothing that cleared 15 outright; three adjacent warm hues in a stoplight
+scheme sit close to the perceptual limit at matched lightness/chroma.
+Accepted at 13.6/15 specifically because every instance of these colours
+in this UI is a labelled badge (colour dot + text + tier×band), never a
+bare colour swatch relying on hue alone - the condition the strict floor
+exists to guard against. The tier-distribution and staleness-distribution
+charts deliberately use a single accent-blue hue instead (a magnitude
+encoding, per the skill's "sequential = one hue" rule) precisely so they
+don't compete with the status ramp's meaning.
+
+**Layout**: a persistent sidebar (repository form, recent repos via
+`localStorage` - never sent to the server, load-and-forget convenience
+only) plus a wide content area (stat tiles, three small charts, the
+triage table) - closer to a console than a stacked web form. The rule
+detail panel is tabbed (Overview / Source / History) rather than one long
+scroll of tables, so the primary read (the explain narrative + priority)
+isn't buried under raw field dumps; Source and History are one click away
+for anyone who wants to verify against the rule's actual content and git
+past.
 
 ## What this GUI deliberately does not do
 

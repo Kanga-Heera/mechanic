@@ -8,28 +8,21 @@
 </head>
 <body>
 
-<header class="topbar">
-  <div class="topbar-left">
-    <span class="brand">mechanic</span>
-    <span class="badge badge-core">CORE ONLY — no repair</span>
-  </div>
-  <div class="topbar-right">
-    <button id="legend-toggle" class="btn btn-ghost" type="button">Priority legend</button>
-  </div>
-</header>
+<div class="app-shell">
 
-<main>
+  <aside class="sidebar">
+    <div class="brand-row">
+      <span class="brand">mechanic</span>
+      <span class="badge badge-core">CORE ONLY</span>
+    </div>
 
-  <!-- Load panel -->
-  <section id="load-panel" class="panel load-panel">
-    <h2>Load a repository</h2>
-    <p class="muted">Runs the same core engine as <code>mechanic triage</code> - nothing here is recomputed or reshaped, this is a view over its JSON.</p>
-    <form id="load-form" class="load-form">
-      <label>
-        Repository path
-        <input type="text" id="f-path" name="path" placeholder="D:\path\to\sigma" required autocomplete="off" />
-      </label>
-      <div class="load-form-row">
+    <div id="load-panel" class="sidebar-section">
+      <h2>Repository</h2>
+      <form id="load-form" class="load-form">
+        <label>
+          Path
+          <input type="text" id="f-path" name="path" placeholder="D:\path\to\sigma" required autocomplete="off" />
+        </label>
         <label>
           Format
           <select id="f-fmt" name="fmt">
@@ -42,91 +35,141 @@
           Subdirectory <span class="muted">(optional)</span>
           <input type="text" id="f-subdir" name="subdir" placeholder="rules" autocomplete="off" />
         </label>
-        <label>
-          Mechanical threshold
-          <input type="number" id="f-threshold" name="threshold" value="0.10" min="0.01" max="1" step="0.01" />
-        </label>
-        <label class="checkbox-label">
-          <input type="checkbox" id="f-refresh" name="refresh" />
-          Force re-mine (--refresh)
-        </label>
-      </div>
-      <button type="submit" class="btn btn-primary">Load</button>
-    </form>
+        <details class="advanced-details">
+          <summary>Advanced</summary>
+          <label>
+            Mechanical threshold
+            <input type="number" id="f-threshold" name="threshold" value="0.10" min="0.01" max="1" step="0.01" />
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="f-refresh" name="refresh" />
+            Force re-mine (--refresh)
+          </label>
+        </details>
+        <button type="submit" class="btn btn-primary btn-block">Load</button>
+      </form>
 
-    <div id="progress-area" class="progress-area" hidden>
-      <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
-      <p id="progress-label" class="muted">Starting…</p>
+      <div id="progress-area" class="progress-area" hidden>
+        <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+        <p id="progress-label" class="muted"></p>
+      </div>
+
+      <div id="error-banner" class="error-banner" hidden></div>
     </div>
 
-    <div id="error-banner" class="error-banner" hidden></div>
-  </section>
+    <div id="loaded-summary" class="sidebar-section" hidden>
+      <h2>Loaded</h2>
+      <div class="loaded-path mono" id="loaded-path"></div>
+      <button id="change-repo-btn" class="btn btn-ghost btn-block" type="button">Load a different repository</button>
+    </div>
 
-  <!-- Legend panel (collapsible, hidden by default) -->
-  <section id="legend-panel" class="panel legend-panel" hidden>
+    <div id="recent-section" class="sidebar-section" hidden>
+      <h2>Recent</h2>
+      <ul id="recent-list" class="recent-list"></ul>
+    </div>
+
+    <div class="sidebar-section sidebar-footer">
+      <button id="legend-toggle" class="btn btn-ghost btn-block" type="button">Priority legend</button>
+    </div>
+  </aside>
+
+  <main class="main-content">
+
+    <section id="empty-state" class="empty-state">
+      <p class="muted">Load a repository from the sidebar to begin. Runs the same core engine as <code>mechanic triage</code> - nothing here is recomputed or reshaped, this is a view over its JSON.</p>
+    </section>
+
+    <section id="overview" class="overview" hidden>
+      <div class="stat-cards" id="stat-cards"></div>
+
+      <div class="charts-row">
+        <div class="chart-card" id="chart-priority">
+          <h3>Priority</h3>
+          <div class="chart-body" id="chart-priority-body"></div>
+        </div>
+        <div class="chart-card" id="chart-tier">
+          <h3>Fragility tier</h3>
+          <div class="chart-body" id="chart-tier-body"></div>
+        </div>
+        <div class="chart-card" id="chart-staleness">
+          <h3>Staleness</h3>
+          <div class="chart-body" id="chart-staleness-body"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="triage-section" class="panel triage-section" hidden>
+      <div class="controls">
+        <input type="text" id="c-search" class="search-input" placeholder="Filter by file path…" autocomplete="off" />
+        <div class="chip-group" id="chip-priority" data-label="Priority"></div>
+        <div class="chip-group" id="chip-tier" data-label="Tier"></div>
+        <label class="ordering-select">
+          Sort
+          <select id="c-ordering">
+            <option value="priority_first" selected>Worst priority first</option>
+            <option value="tier_first">Fragility tier first</option>
+            <option value="staleness_first">Staleness first</option>
+          </select>
+        </label>
+        <span id="row-count" class="muted row-count"></span>
+      </div>
+
+      <div class="table-wrap">
+        <table id="triage-table" class="triage-table">
+          <thead>
+            <tr>
+              <th data-sort="priority">Priority</th>
+              <th data-sort="file">File</th>
+              <th>Why</th>
+              <th data-sort="staleness">Staleness</th>
+              <th data-sort="age">Age</th>
+            </tr>
+          </thead>
+          <tbody id="triage-tbody"></tbody>
+        </table>
+      </div>
+
+      <details id="unscoreable-details" class="unscoreable-details">
+        <summary id="unscoreable-summary">Unscoreable rules</summary>
+        <table class="triage-table" id="unscoreable-table">
+          <thead><tr><th>File</th><th>Reason</th></tr></thead>
+          <tbody id="unscoreable-tbody"></tbody>
+        </table>
+      </details>
+    </section>
+
+  </main>
+</div>
+
+<!-- Priority legend modal -->
+<div id="legend-overlay" class="modal-overlay" hidden>
+  <div class="modal-panel">
+    <button id="legend-close" class="btn btn-ghost detail-close" type="button" aria-label="Close">Close ✕</button>
     <h2>Priority matrix</h2>
     <p id="legend-rationale" class="muted"></p>
     <table id="legend-table" class="legend-table"></table>
-  </section>
-
-  <!-- Overview -->
-  <section id="overview" class="overview" hidden>
-    <div class="stat-cards" id="stat-cards"></div>
-    <div class="priority-pills" id="priority-pills"></div>
-  </section>
-
-  <!-- Controls + table -->
-  <section id="triage-section" class="panel triage-section" hidden>
-    <div class="controls">
-      <input type="text" id="c-search" class="search-input" placeholder="Filter by file path…" autocomplete="off" />
-
-      <div class="chip-group" id="chip-priority" data-label="Priority"></div>
-      <div class="chip-group" id="chip-tier" data-label="Tier"></div>
-
-      <label class="ordering-select">
-        Sort
-        <select id="c-ordering">
-          <option value="priority_first" selected>Worst priority first</option>
-          <option value="tier_first">Fragility tier first</option>
-          <option value="staleness_first">Staleness first</option>
-        </select>
-      </label>
-
-      <span id="row-count" class="muted row-count"></span>
-    </div>
-
-    <div class="table-wrap">
-      <table id="triage-table" class="triage-table">
-        <thead>
-          <tr>
-            <th data-sort="file">File</th>
-            <th data-sort="priority">Priority</th>
-            <th data-sort="tier">Tier</th>
-            <th>Why</th>
-            <th data-sort="staleness">Staleness</th>
-            <th data-sort="age">Age</th>
-          </tr>
-        </thead>
-        <tbody id="triage-tbody"></tbody>
-      </table>
-    </div>
-
-    <details id="unscoreable-details" class="unscoreable-details">
-      <summary id="unscoreable-summary">Unscoreable rules</summary>
-      <table class="triage-table" id="unscoreable-table">
-        <thead><tr><th>File</th><th>Reason</th></tr></thead>
-        <tbody id="unscoreable-tbody"></tbody>
-      </table>
-    </details>
-  </section>
-
-</main>
+  </div>
+</div>
 
 <!-- Rule detail slide-over -->
 <div id="detail-overlay" class="detail-overlay" hidden>
   <div id="detail-panel" class="detail-panel">
     <button id="detail-close" class="btn btn-ghost detail-close" type="button" aria-label="Close">Close ✕</button>
-    <div id="detail-content"></div>
+    <div class="rule-file mono" id="detail-file"></div>
+
+    <div class="tabs" id="detail-tabs">
+      <button class="tab-btn active" data-tab="overview" type="button">Overview</button>
+      <button class="tab-btn" data-tab="source" type="button">Source</button>
+      <button class="tab-btn" data-tab="history" type="button">History</button>
+    </div>
+
+    <div class="tab-panel active" id="tab-overview"></div>
+    <div class="tab-panel" id="tab-source">
+      <pre class="source-view mono" id="source-view">Loading…</pre>
+    </div>
+    <div class="tab-panel" id="tab-history">
+      <div id="history-view" class="history-view">Loading…</div>
+    </div>
   </div>
 </div>
 

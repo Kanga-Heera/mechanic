@@ -216,6 +216,50 @@ def test_priority_legend_endpoint_matches_core_schema(client: TestClient):
     assert resp.json() == priority.priority_matrix_schema()
 
 
+# --- rule source + git history -----------------------------------------
+
+
+def test_rule_source_returns_verbatim_file_content(client: TestClient, small_repo: Path):
+    job_id = _load_and_wait(client, small_repo)
+    resp = client.get(f"/api/jobs/{job_id}/rule-source", params={"file": "rules/good.yml"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["file"] == "rules/good.yml"
+    assert data["content"] == (small_repo / "rules" / "good.yml").read_text(encoding="utf-8")
+
+
+def test_rule_source_unknown_file_404(client: TestClient, small_repo: Path):
+    job_id = _load_and_wait(client, small_repo)
+    resp = client.get(f"/api/jobs/{job_id}/rule-source", params={"file": "rules/nope.yml"})
+    assert resp.status_code == 404
+
+
+def test_rule_source_refuses_path_traversal(client: TestClient, small_repo: Path):
+    job_id = _load_and_wait(client, small_repo)
+    resp = client.get(f"/api/jobs/{job_id}/rule-source", params={"file": "../../../../etc/passwd"})
+    assert resp.status_code == 403
+
+
+def test_rule_history_lists_real_mined_commits(client: TestClient, small_repo: Path):
+    job_id = _load_and_wait(client, small_repo)
+    resp = client.get(f"/api/jobs/{job_id}/rule-history", params={"file": "rules/good.yml"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["file"] == "rules/good.yml"
+    assert len(data["commits"]) >= 1
+    commit = data["commits"][0]
+    for key in ["hash", "short_hash", "subject", "author", "date", "is_merge"]:
+        assert key in commit
+    assert commit["subject"] == "add rules"
+
+
+def test_rule_history_unrelated_file_empty_not_error(client: TestClient, small_repo: Path):
+    job_id = _load_and_wait(client, small_repo)
+    resp = client.get(f"/api/jobs/{job_id}/rule-history", params={"file": "rules/never_existed.yml"})
+    assert resp.status_code == 200
+    assert resp.json()["commits"] == []
+
+
 # --- edge states: no crash, a clear message ---------------------------
 
 

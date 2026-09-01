@@ -2973,6 +2973,27 @@ errors as clear messages, proven with real HTTP status codes (400/422),
 not just asserted. Full architecture and design notes:
 [`docs/gui-notes.md`](docs/gui-notes.md).
 
+**A follow-up pass, still view-only.** The first cut above worked but read
+as "a dark-mode form"; a second pass added two small, genuinely new (but
+still read-only, still non-recomputed) backend endpoints -
+`/api/jobs/{id}/rule-source` (the rule file's raw content, verbatim, path
+confined to the loaded repo root) and `/api/jobs/{id}/rule-history` (every
+mined commit touching that file, filtered from the SAME `all_facts` the
+report was already built from - not re-mined) - plus a full frontend
+redesign: a persistent sidebar with `localStorage`-only recent-repo memory,
+three small inline-SVG charts (priority as a segmented status bar; tier
+and staleness distribution as single-hue accent-blue magnitude bars, kept
+deliberately separate in hue from the status ramp), and a tabbed rule
+detail panel (Overview / Source / History) replacing one long scroll of
+tables. The status colour ramp was run through the `dataviz` skill's
+`validate_palette.js` against the actual dark surface rather than chosen
+by eye - see `docs/gui-notes.md`'s Design section for the exact numbers
+and the one check it doesn't clear outright (13.6 vs. a 15 floor on the
+tightest adjacent pair, accepted because every instance is a labelled
+badge, never a bare colour swatch). Verified visually end-to-end again
+against a real running server. 5 new tests for the two new endpoints
+(path-traversal refusal included).
+
 ### Reproducing this feature
 
 ```
@@ -2981,7 +3002,8 @@ pytest tests/test_priority_matrix.py tests/test_gui.py -v
 mechanic gui   # needs: pip install "mechanic[gui]"
 ```
 
-Full suite: 283 tests (up from 235 before this feature - 48 new: 24 in
-tests/test_priority_matrix.py, 17 in tests/test_gui.py, 7 added to
-tests/test_cli.py), 246 pass, 37 skipped (unchanged skip set).
+Full suite: 288 tests (up from 235 before this feature - 53 new: 24 in
+tests/test_priority_matrix.py, 22 in tests/test_gui.py including the
+follow-up pass's rule-source/rule-history coverage, 7 added to
+tests/test_cli.py), 251 pass, 37 skipped (unchanged skip set).
 

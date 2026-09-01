@@ -54,6 +54,7 @@ class Job:
     total: int = 0
     error: Optional[str] = None
     report: Optional[priority.TriageReport] = None
+    all_facts: Optional[list] = None  # kept only for the rule-history endpoint below
     created_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
 
@@ -81,15 +82,26 @@ def _run_job(job: Job) -> None:
             job.total = total
 
     try:
+        root = Path(job.path)
+        # Mined here (not left to compute_triage's own internal call) purely
+        # so the facts can be kept on the Job afterward for the rule-history
+        # endpoint below - same cache-aware churn.mine_commits_cached call
+        # `compute_triage` would make internally either way, not a second
+        # mining pass, not a new analysis.
+        all_facts = churn.mine_commits_cached(
+            root, job.fmt, subdir=job.subdir, progress_cb=lambda stage, n: progress_cb(stage, n, 0)
+        )
         report = priority.compute_triage(
-            Path(job.path),
+            root,
             job.fmt,
             job.mechanical_threshold,
             subdir=job.subdir,
+            all_facts=all_facts,
             progress_cb=progress_cb,
         )
         with _JOBS_LOCK:
             job.report = report
+            job.all_facts = all_facts
             job.status = "done"
             job.finished_at = time.time()
     except churn.ChurnError as e:
@@ -104,6 +116,46 @@ def _run_job(job: Job) -> None:
             job.error = f"{type(e).__name__}: {e}"
             job.status = "error"
             job.finished_at = time.time()
+
+
+def _commit_history_for_file(all_facts: list, file_rel: str, limit: int = 50) -> list[dict[str, Any]]:
+    """Every organic-or-not commit that touched `file_rel` (under any of its
+    past names, resolved through the same rename map `priority.compute_
+    triage` already builds internally) - real, already-mined commit facts,
+    filtered per file. Not a new analysis: no classification, no staleness
+    math, just a list of (hash, date, subject) a human can read."""
+    renamed_to = churn._build_renamed_to(all_facts)
+    history = []
+    for f in all_facts:
+        for touched in f.rule_paths_touched:
+            canonical = churn._resolve_canonical(touched, renamed_to)
+            if canonical == file_rel:
+                history.append(
+                    {
+                        "hash": f.hash,
+                        "short_hash": f.hash[:10],
+                        "subject": f.subject,
+                        "author": f.author_key,
+                        "date": f.author_date.isoformat(),
+                        "is_merge": f.is_merge,
+                    }
+                )
+                break
+    history.sort(key=lambda h: h["date"], reverse=True)
+    return history[:limit]
+
+
+def _safe_resolve_under_root(root: Path, rel: str) -> Path:
+    """Resolves `rel` under `root` and refuses to return anything outside
+    it - `rel` comes from a query param, and while this is a local,
+    single-operator tool (same trust model as the CLI reading any path you
+    hand it), a `../../` path-traversal attempt into the rule-source
+    endpoint is still refused rather than silently followed."""
+    candidate = (root / rel).resolve()
+    root_resolved = root.resolve()
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        raise HTTPException(403, "path escapes the loaded repository root")
+    return candidate
 
 
 class LoadRequest(BaseModel):
@@ -174,6 +226,40 @@ def create_app() -> FastAPI:
         if match is None:
             raise HTTPException(404, f"rule not found in this job's report: {file}")
         return match.to_dict()
+
+    @app.get("/api/jobs/{job_id}/rule-source")
+    def rule_source(job_id: str, file: str = Query(...)) -> dict[str, Any]:
+        """The rule's raw file content, verbatim - not part of any
+        analysis, just a read of the same file `triage`/`explain` already
+        parsed. Confined to the loaded repository root (see
+        `_safe_resolve_under_root`)."""
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(404, "unknown job_id")
+            job_path = job.path
+        full_path = _safe_resolve_under_root(Path(job_path), file)
+        if not full_path.is_file():
+            raise HTTPException(404, f"file not found: {file}")
+        try:
+            content = full_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            raise HTTPException(500, f"could not read file: {e}")
+        return {"file": file, "content": content}
+
+    @app.get("/api/jobs/{job_id}/rule-history")
+    def rule_history(job_id: str, file: str = Query(...)) -> dict[str, Any]:
+        """Every mined commit that touched this file (under any past
+        rename), newest first - filtered from the SAME all_facts this
+        job's report was already built from, not re-mined."""
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(404, "unknown job_id")
+            if job.status != "done" or job.all_facts is None:
+                raise HTTPException(425, f"job not finished yet (status={job.status})")
+            all_facts = job.all_facts
+        return {"file": file, "commits": _commit_history_for_file(all_facts, file)}
 
     @app.get("/api/priority-legend")
     def priority_legend() -> dict[str, Any]:
