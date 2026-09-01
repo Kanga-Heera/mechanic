@@ -20,7 +20,14 @@ dependencies = [
 # STP rank-correlation regression lock, Part 4 of the core hardening pass)
 # - test tooling, not a runtime dependency of the core or the experiment.
 # That one test module skips itself (pytest.importorskip) if they're absent.
-dev = ["pytest>=7.0", "scipy>=1.11", "numpy>=1.26"]
+dev = [
+    "pytest>=7.0",
+    "scipy>=1.11",
+    "numpy>=1.26",
+    # for tests/test_gui.py (FastAPI's TestClient) - the GUI's own runtime
+    # dependency is the separate `gui` extra below; this is test tooling.
+    "httpx>=0.27",
+]
 # Stage 3 EXPERIMENT only (repair-verification harness + LLM repair
 # generator) - see docs/core-vs-experiment.md. The core product
 # (scan/staleness/triage/explain) does not need requests and has no network
@@ -28,6 +35,12 @@ dev = ["pytest>=7.0", "scipy>=1.11", "numpy>=1.26"]
 # mechanic.llm_client/verify/gate/evasion/repair_generator/repair_outcome/
 # synthetic_benign modules use this.
 repair = ["requests>=2.31"]
+# Local GUI (`mechanic gui`) - a VIEW over the core engine only, never the
+# repair experiment. Runs fully offline (no CDN assets, no network calls
+# from the served page). `mechanic/cli.py` imports mechanic.gui lazily
+# (inside the `gui` command body), so these are never required just to run
+# scan/staleness/triage/explain.
+gui = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 mechanic = "mechanic.cli:main"
@@ -41,4 +54,4 @@ build-backend = "setuptools.build_meta"
 include = ["mechanic*"]
 
 [tool.setuptools.package-data]
-mechanic = ["data/*.json", "data/*.md"]
+mechanic = ["data/*.json", "data/*.md", "gui/static/*"]

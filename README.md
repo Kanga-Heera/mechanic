@@ -300,6 +300,39 @@ re-mine regardless.
 Validation (top-20 SigmaHQ triage output with full explanations, threshold
 sensitivity, bucket counts, unscoreable counts and reasons): see RESULTS.md.
 
+**Priority (CRITICAL/HIGH/MEDIUM/LOW)** is layered on top of the same two
+axes as an explicit, documented lookup table
+(`mechanic/priority.py::PRIORITY_MATRIX`) — never a third, blended number.
+It exists precisely because the two axes above don't fuse (Task 7's own
+finding); the matrix is a transparent function of them, always shown with
+both axis values (`mechanic priority-legend` prints the table itself, no
+repository needed). See `RESULTS.md`'s "Priority as a transparent matrix"
+section for the full rationale and the correction made to the naive "worse
+tier = TTP" framing (it's IOC, matching mechanic's own tier semantics and
+the STP validation's direction).
+
+```
+mechanic priority-legend        # the fixed matrix + rationale, no repo needed
+mechanic triage --ordering priority_first <path>
+```
+
+### 6. GUI (`mechanic gui`, `mechanic/gui/`)
+
+```
+mechanic gui                    # opens http://127.0.0.1:8642/ in a browser
+```
+
+A local, offline web GUI over the exact same engine — no repair, no
+network, no API key. It's a FastAPI backend that calls
+`priority.compute_triage()` (the same function `triage`/`explain` use) and
+serves its JSON to a static vanilla-JS frontend: repo overview cards,
+a sortable/filterable triage table with the priority matrix cell on every
+row, a rule-detail panel (the same `explain` prose), and a priority-matrix
+legend. Needs the optional `gui` extra (`pip install "mechanic[gui]"`).
+Full architecture, the offline guarantee, and how "this never recomputes
+anything" is actually enforced (not just claimed): see
+[`docs/gui-notes.md`](docs/gui-notes.md).
+
 ## JSON schema (stable — Stage 2/3 consume this)
 
 `scan --json`:

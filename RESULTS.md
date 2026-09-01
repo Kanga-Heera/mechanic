@@ -2881,3 +2881,107 @@ Full suite (235 tests, up from 174 before this pass - 61 new tests across
 the four files above): 198 pass, 37 skipped (unchanged skip set - the
 experiment's own RSigma/API-key-gated tests).
 
+---
+
+# Priority matrix + GUI: view-layer features over the hardened core
+
+Two additions on top of the hardened core above, requested together: an
+explicit priority label per rule, and a local web GUI. Both are CORE-only -
+the Stage 3 repair experiment is untouched, unexposed, and confirmed still
+quarantined (`tests/test_core_isolation.py` re-run and green; the GUI gets
+its own equivalent check, `tests/test_gui.py::
+test_gui_source_imports_nothing_from_experiment`). No validated number
+from any earlier section changed.
+
+## Priority as a transparent matrix, never a blended score
+
+Task 7's pre-registered correlation experiment (this document, "Part 3
+(pre-work)") found no association between staleness and fragility that
+survives an age control on the externally-validated corpus - the reason
+`mechanic triage` has always reported the two axes side by side rather
+than fused. A priority *label* is still useful for triage, so it was added
+as an explicit **lookup table** over the two existing axes
+(`mechanic/priority.py::PRIORITY_MATRIX`, 4 fragility tiers × 3 staleness
+bands = 12 fixed cells), never a formula that blends them. Every label is
+always shown paired with the cell that produced it (`tier`, `staleness_
+band`) - `mechanic triage`/`explain`/`--json` never emit a bare
+`"CRITICAL"` without both.
+
+**One correction made to the originally-proposed matrix, documented in
+code and here rather than applied silently.** The matrix was specified
+with TTP-tier rules as the "worst" row and IOC as "durable." That inverts
+mechanic's own established tier semantics: IOC is documented everywhere
+else in this codebase (the `explain` narrative's `tier_meaning`, the
+classifier itself) as "the least durable kind of match possible," and TTP
+as "the most durable" - and the STP external validation's own direction
+confirms it (Kendall's tau-b = 0.361, p = 0.0010: mechanic's tier rank
+tracks MITRE's own analytic-robustness score with IOC at the fragile end,
+not the reverse). Implementing the matrix as originally specified would
+have told an engineer that mechanic's most durable, hardest-to-evade
+matches need urgent attention while its most trivially-evadable ones are
+safe - a direct, provable inversion of the one externally-validated
+finding this whole project rests on. Corrected: IOC is the CRITICAL row
+when stale, TTP the LOW row - same 12-cell shape, same CRITICAL/HIGH/
+MEDIUM/LOW distribution per column, rows relabeled to match reality.
+
+| Tier \ Staleness | Stale &gt;2yr | Aging 6mo-2yr | Fresh &lt;6mo |
+|---|---|---|---|
+| IOC (worst) | CRITICAL | HIGH | MEDIUM |
+| Artifact | CRITICAL | HIGH | MEDIUM |
+| Tool | HIGH | MEDIUM | LOW |
+| TTP (best) | MEDIUM | LOW | LOW |
+
+Staleness bands reuse the already-validated `churn.STALE_DAYS`
+(730d/2yr) and `RECENT_DAYS` (182d/6mo) thresholds - not new numbers.
+Genuine uncertainty (an unscoreable rule, or a staleness band that can't
+be resolved because no creation date was found) surfaces as
+`priority.uncertain = true` with a stated reason and `label = null`,
+never smoothed into a confident-looking label - the same discipline the
+Stage 3 gate's `fully_exercised` flag applies to repair verdicts, applied
+here to priority. Regression-locked cell-by-cell, plus two monotonicity
+properties (a worse tier or more staleness never produces a *better*
+priority), in `tests/test_priority_matrix.py`.
+
+A new `mechanic priority-legend` command prints the matrix and its
+rationale with no repository needed - this is also what the GUI's legend
+panel and `triage --json`'s embedded `priority_matrix` key both serve
+directly, so the legend is never a second, independently-maintained copy
+of the table.
+
+## The GUI: a view over the same engine, nothing recomputed
+
+`mechanic gui` (optional `gui` extra - FastAPI + a static vanilla-JS
+frontend, no build step, no CDN dependency) serves the exact same
+`priority.compute_triage()` output `mechanic triage --json` produces,
+through a background job (so a multi-minute mining/classification pass on
+a large repo doesn't block the server) with real progress reporting - a
+new, additive `progress_cb` parameter on `compute_triage`/`mine_commits*`
+(every existing call site passes nothing and is unaffected) reports actual
+commit-mining counts and actual per-rule classification progress, not a
+simulated timer.
+
+**The load-bearing proof this is a view, not a reimplementation**:
+`tests/test_gui.py::test_load_and_poll_and_result_matches_core_directly`
+asserts the GUI's HTTP response for a loaded repo is byte-identical (as
+parsed JSON) to calling `priority.compute_triage(...).to_dict()` directly
+in the same test. Repair stays unexposed: the GUI package imports only
+`mechanic.churn`/`mechanic.priority`, confirmed by the same source-scan
+discipline `tests/test_core_isolation.py` already applies to the core CLI,
+plus a check that no API route path even mentions verify/gate/repair.
+Edge cases (no `.git`, zero rules, a bad path) surface the core's own loud
+errors as clear messages, proven with real HTTP status codes (400/422),
+not just asserted. Full architecture and design notes:
+[`docs/gui-notes.md`](docs/gui-notes.md).
+
+### Reproducing this feature
+
+```
+mechanic priority-legend
+pytest tests/test_priority_matrix.py tests/test_gui.py -v
+mechanic gui   # needs: pip install "mechanic[gui]"
+```
+
+Full suite: 283 tests (up from 235 before this feature - 48 new: 24 in
+tests/test_priority_matrix.py, 17 in tests/test_gui.py, 7 added to
+tests/test_cli.py), 246 pass, 37 skipped (unchanged skip set).
+

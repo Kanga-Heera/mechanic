@@ -41,6 +41,10 @@ click.rich_click.COMMAND_GROUPS = {
             "name": "Triage (Part 2/3 - fragility + review priority)",
             "commands": ["triage", "explain", "priority-legend"],
         },
+        {
+            "name": "GUI (view-only, no repair)",
+            "commands": ["gui"],
+        },
     ]
 }
 click.rich_click.OPTION_GROUPS = {
@@ -696,6 +700,37 @@ def priority_legend(as_json: bool) -> None:
             row.append(f"[{style}]{label}[/{style}]" if style else label)
         t.add_row(*row)
     console.print(t)
+
+
+@main.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="Interface to bind the local server to.")
+@click.option("--port", default=8642, show_default=True, type=int, help="Port to serve on.")
+@click.option("--no-browser", is_flag=True, help="Don't automatically open a browser tab.")
+def gui(host: str, port: int, no_browser: bool) -> None:
+    """Launch the local web GUI - a VIEW over this same core engine.
+
+    Runs fully offline: no network access, no API key, no RSigma. It is a
+    thin FastAPI server that calls straight into `mechanic.priority`/
+    `mechanic.churn` (the exact same functions `triage`/`explain` use) and
+    serves their JSON to a static frontend - it never recomputes or
+    reshapes an analysis result, and it never exposes the Stage 3 repair
+    experiment (see docs/core-vs-experiment.md). Needs the optional `gui`
+    extra: [cyan]pip install "mechanic\[gui]"[/cyan].
+
+    \b
+    Examples:
+      mechanic gui
+      mechanic gui --port 9000 --no-browser
+    """
+    try:
+        from mechanic.gui.server import run_server
+    except ImportError:
+        err_console.print(
+            "[red]The GUI needs extra dependencies that aren't installed.[/red]\n"
+            'Install them with: [cyan]pip install "mechanic\\[gui]"[/cyan]'
+        )
+        raise SystemExit(1)
+    run_server(host=host, port=port, open_browser=not no_browser)
 
 
 if __name__ == "__main__":
