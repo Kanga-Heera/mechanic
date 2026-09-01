@@ -135,15 +135,73 @@ def test_triage_json_schema_and_one_line_summary(cli_repo: Path):
     result = runner.invoke(main, ["triage", str(cli_repo), "--subdir", "rules", "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.stdout)
-    for key in ["root", "fmt", "mechanical_threshold", "ordering", "rule_count", "scoreable_count", "unscoreable_count", "summary", "bucket_counts", "disclosure", "rules", "unscoreable"]:
+    for key in ["root", "fmt", "mechanical_threshold", "ordering", "rule_count", "scoreable_count", "unscoreable_count", "summary", "bucket_counts", "priority_breakdown", "priority_matrix", "disclosure", "rules", "unscoreable"]:
         assert key in data, f"triage --json missing documented key {key!r}"
     assert data["summary"].startswith(f"{data['rule_count']} rules,")
     assert "need attention (fragile AND stale)" in data["summary"]
 
     for entry in data["rules"] + data["unscoreable"]:
-        for key in ["file", "narrative", "short_reason", "staleness", "fragility", "is_fragile", "needs_attention", "triage_hypotheses"]:
+        for key in ["file", "narrative", "short_reason", "staleness", "fragility", "is_fragile", "needs_attention", "priority", "triage_hypotheses"]:
             assert key in entry, f"triage rule entry missing documented key {key!r}"
         assert "is_stale" in entry["staleness"]
+        for key in ["label", "tier", "staleness_band", "lower_confidence", "uncertain", "uncertainty_reason"]:
+            assert key in entry["priority"], f"priority entry missing documented key {key!r}"
+
+
+def test_triage_priority_breakdown_sums_to_rule_count(cli_repo: Path):
+    result = runner.invoke(main, ["triage", str(cli_repo), "--subdir", "rules", "--json"])
+    data = json.loads(result.stdout)
+    assert sum(data["priority_breakdown"].values()) == data["rule_count"]
+    assert set(data["priority_breakdown"]) == {"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNCERTAIN"}
+
+
+def test_triage_priority_never_bare_always_carries_both_axes(cli_repo: Path):
+    """The JSON form of "never show a priority label without tier x
+    staleness alongside it" - every non-uncertain entry must have both."""
+    result = runner.invoke(main, ["triage", str(cli_repo), "--subdir", "rules", "--json"])
+    data = json.loads(result.stdout)
+    for entry in data["rules"] + data["unscoreable"]:
+        p = entry["priority"]
+        if not p["uncertain"] and p["label"] is not None:
+            assert p["tier"] is not None
+            assert p["staleness_band"] is not None
+        if p["uncertain"]:
+            assert p["label"] is None
+            assert p["uncertainty_reason"]
+
+
+def test_triage_priority_column_visible_in_human_output(cli_repo: Path):
+    result = runner.invoke(main, ["triage", str(cli_repo), "--subdir", "rules"], env={"COLUMNS": "250"})
+    assert result.exit_code == 0, result.output
+    assert "priority" in result.output.lower()
+    assert "priority-legend" in result.output
+
+
+def test_triage_priority_first_ordering_sorts_worst_label_first(cli_repo: Path):
+    result = runner.invoke(main, ["triage", str(cli_repo), "--subdir", "rules", "--ordering", "priority_first", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    label_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, None: 4}
+    ranks = [label_rank[r["priority"]["label"]] for r in data["rules"]]
+    assert ranks == sorted(ranks)
+
+
+def test_priority_legend_json_schema():
+    result = runner.invoke(main, ["priority-legend", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    for key in ["tiers_worst_to_best", "staleness_bands_stale_to_fresh", "labels_worst_to_best", "cells", "rationale"]:
+        assert key in data
+    assert len(data["cells"]) == 12
+    assert data["tiers_worst_to_best"] == ["IOC", "Artifact", "Tool", "TTP"]
+
+
+def test_priority_legend_needs_no_repository():
+    """A pure schema command - no PATH argument at all."""
+    result = runner.invoke(main, ["priority-legend"])
+    assert result.exit_code == 0, result.output
+    assert "CRITICAL" in result.output
+    assert "IOC" in result.output
 
 
 def test_triage_never_combines_staleness_and_fragility_into_one_score(cli_repo: Path):
@@ -245,8 +303,15 @@ def test_explain_json_schema(cli_repo: Path):
     result = runner.invoke(main, ["explain", str(cli_repo / "rules" / "fragile.yml"), "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.stdout)
-    for key in ["file", "narrative", "short_reason", "staleness", "fragility", "is_fragile", "needs_attention", "triage_hypotheses"]:
+    for key in ["file", "narrative", "short_reason", "staleness", "fragility", "is_fragile", "needs_attention", "priority", "triage_hypotheses"]:
         assert key in data, f"explain --json missing documented key {key!r}"
+
+
+def test_explain_human_output_shows_priority_table(cli_repo: Path):
+    result = runner.invoke(main, ["explain", str(cli_repo / "rules" / "fragile.yml")], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "Priority" in result.output
+    assert "priority-legend" in result.output
 
 
 def test_explain_unknown_file_fails_loud_not_silent(cli_repo: Path):

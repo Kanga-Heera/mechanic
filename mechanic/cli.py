@@ -39,7 +39,7 @@ click.rich_click.COMMAND_GROUPS = {
         },
         {
             "name": "Triage (Part 2/3 - fragility + review priority)",
-            "commands": ["triage", "explain"],
+            "commands": ["triage", "explain", "priority-legend"],
         },
     ]
 }
@@ -163,13 +163,37 @@ def _render_staleness_report(report: churn.StalenessReport, top_n: int) -> None:
     console.print(stalest)
 
 
-def _render_rule_signal_row(r: priority.RuleSignals) -> tuple[str, str, str, str, str, str, str]:
+_PRIORITY_STYLE = {
+    "CRITICAL": "bold red",
+    "HIGH": "bold orange3",
+    "MEDIUM": "yellow",
+    "LOW": "dim",
+}
+
+
+def _render_priority_cell(p: priority.Priority) -> str:
+    if p.uncertain or p.label is None:
+        return "[dim]UNCERTAIN[/dim]"
+    style = _PRIORITY_STYLE.get(p.label, "")
+    band_label = {
+        "stale_over_2yr": ">2yr",
+        "aging_6mo_to_2yr": "6mo-2yr",
+        "fresh_under_6mo": "<6mo",
+    }.get(p.staleness_band, p.staleness_band or "-")
+    text = f"[{style}]{p.label}[/{style}] ({p.tier}×{band_label})" if style else f"{p.label} ({p.tier}×{band_label})"
+    if p.lower_confidence:
+        text += "*"
+    return text
+
+
+def _render_rule_signal_row(r: priority.RuleSignals) -> tuple[str, str, str, str, str, str, str, str]:
     tier = r.fragility.tier or "-"
     conf = r.fragility.confidence + ("*" if r.fragility.caveat else "")
     staleness = "NEVER REVISED" if r.never_revised else f"{r.days_since_behavioral_change}d since behavioral change"
     hyps = ", ".join(r.triage_hypotheses) if r.triage_hypotheses else "-"
     return (
         r.file,
+        _render_priority_cell(r.priority),
         tier,
         conf,
         r.short_reason,
@@ -194,11 +218,14 @@ def _render_triage_report(report: priority.TriageReport, top_n: int, ordering: s
         summary.add_row(f"triage hypothesis: {h}", str(count))
     console.print(summary)
 
-    ordering_label = (
-        "fragility tier first, then staleness" if ordering == "tier_first" else "staleness first, then fragility tier"
-    )
-    t = Table(title=f"Top {top_n}, sorted for review, worst first ({ordering_label} — not a combined score)")
+    ordering_labels = {
+        "tier_first": "fragility tier first, then staleness",
+        "staleness_first": "staleness first, then fragility tier",
+        "priority_first": "priority label first (CRITICAL..LOW)",
+    }
+    t = Table(title=f"Top {top_n}, sorted for review, worst first ({ordering_labels[ordering]} — not a combined score)")
     t.add_column("file", overflow="fold")
+    t.add_column("priority (tier×staleness)")
     t.add_column("tier")
     t.add_column("tier conf.")
     t.add_column("why (driving observable)", overflow="fold")
@@ -209,13 +236,19 @@ def _render_triage_report(report: priority.TriageReport, top_n: int, ordering: s
     for r in rows:
         t.add_row(*_render_rule_signal_row(r))
     console.print(t)
+    console.print(
+        "Priority is a lookup over two separate axes (fragility tier × staleness band) shown in "
+        "parentheses next to every label - never a blended score. See `mechanic priority-legend` "
+        "for the full matrix.",
+        style="dim",
+    )
     if any(r.fragility.caveat for r in rows):
         console.print(
-            "[yellow]* tier confidence marked with an asterisk comes from the TEXT-ONLY path "
-            "(Elastic/Splunk, no AST) — computed WITHOUT the AND/OR combination correction that "
-            "external validation against MITRE STP showed necessary. Treat these tiers as less "
-            "trustworthy than an unmarked (Sigma/AST) tier; see `mechanic explain <file>` for the "
-            "full caveat on any individual row.[/yellow]"
+            "[yellow]* tier confidence (and any priority marked with a trailing *) comes from the "
+            "TEXT-ONLY path (Elastic/Splunk, no AST) — computed WITHOUT the AND/OR combination "
+            "correction that external validation against MITRE STP showed necessary. Treat these as "
+            "less trustworthy than an unmarked (Sigma/AST) tier; see `mechanic explain <file>` for "
+            "the full caveat on any individual row.[/yellow]"
         )
 
     if report.unscoreable:
@@ -301,6 +334,18 @@ def _render_explain(sig: priority.RuleSignals) -> None:
         console.print(f"Triage hypotheses (Stage 3, UNTESTED — not conclusions): {', '.join(sig.triage_hypotheses)}")
     else:
         console.print("Triage hypotheses: none of the documented heuristic combinations matched.")
+
+    console.print()
+    p = sig.priority
+    prio_t = Table(title="Priority (matrix lookup - see `mechanic priority-legend`)")
+    prio_t.add_column("field")
+    prio_t.add_column("value")
+    prio_t.add_row("label", _render_priority_cell(p))
+    prio_t.add_row("fragility tier (axis 1)", p.tier or "-")
+    prio_t.add_row("staleness band (axis 2)", p.staleness_band or "-")
+    if p.uncertain:
+        prio_t.add_row("uncertain", f"[yellow]{p.uncertainty_reason}[/yellow]")
+    console.print(prio_t)
 
 
 @click.group(
@@ -515,10 +560,10 @@ def report(
 )
 @click.option(
     "--ordering",
-    type=click.Choice(["tier_first", "staleness_first"]),
+    type=click.Choice(["tier_first", "staleness_first", "priority_first"]),
     default="tier_first",
     show_default=True,
-    help="Which unweighted sort strategy to scan by (no combined score exists - see RESULTS.md).",
+    help="Which unweighted sort/lookup strategy to scan by (no combined score exists - see RESULTS.md).",
 )
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON instead of tables.")
 def triage(
@@ -617,6 +662,40 @@ def explain(
         _print_json(match.to_dict())
     else:
         _render_explain(match)
+
+
+@main.command("priority-legend")
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON instead of a table.")
+def priority_legend(as_json: bool) -> None:
+    """Print the priority matrix itself - the full, fixed lookup table
+    every rule's priority label comes from, plus the rationale for why
+    it's shaped the way it is. Needs no repository - this is a static
+    schema, not a computation over any rule.
+
+    \b
+    Examples:
+      mechanic priority-legend
+      mechanic priority-legend --json
+    """
+    schema = priority.priority_matrix_schema()
+    if as_json:
+        _print_json(schema)
+        return
+    console.print("[bold]mechanic priority-legend[/bold]\n")
+    console.print(schema["rationale"])
+    console.print()
+    t = Table(title="Priority matrix (fragility tier × staleness band)")
+    t.add_column("tier (worst -> best)")
+    for band in schema["staleness_bands_stale_to_fresh"]:
+        t.add_column(band)
+    for tier in schema["tiers_worst_to_best"]:
+        row = [tier]
+        for band in schema["staleness_bands_stale_to_fresh"]:
+            label = next(c["label"] for c in schema["cells"] if c["tier"] == tier and c["staleness_band"] == band)
+            style = _PRIORITY_STYLE.get(label, "")
+            row.append(f"[{style}]{label}[/{style}]" if style else label)
+        t.add_row(*row)
+    console.print(t)
 
 
 if __name__ == "__main__":

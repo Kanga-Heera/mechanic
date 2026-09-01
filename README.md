@@ -367,11 +367,16 @@ Node shapes under `conditions`:
   "rule_count": 0, "scoreable_count": 0, "unscoreable_count": 0,
   "summary": "N rules, X fragile, Y stale, Z need attention (fragile AND stale)",
   "bucket_counts": {"likely-repairable": 0, "likely-needs-telemetry-check": 0, "likely-retire": 0},
+  "priority_breakdown": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "UNCERTAIN": 0},  // sums to rule_count
+  "priority_matrix": { /* the full matrix schema - see `priority-legend --json` below, embedded here too so a GUI never needs a second call to render its legend */ },
   "disclosure": "...",  // the no-combined-score disclosure, always present, never omit when displaying this data
   "rules": [ /* scoreable rules, sorted per `ordering` - shape below */ ],
   "unscoreable": [ /* same shape, tier/fragility fields null/empty, unscoreable_reason set */ ]
 }
 ```
+
+`ordering` accepts `tier_first` (default), `staleness_first`, or `priority_first` - all three are unweighted
+lookups/sorts, never a fused score (see `mechanic/priority.py`'s module docstring for why).
 
 Each entry in `rules`/`unscoreable` (also the shape `explain --json` returns for one rule):
 
@@ -394,11 +399,31 @@ Each entry in `rules`/`unscoreable` (also the shape `explain --json` returns for
   },
   "is_fragile": false,       // tier in {IOC, Artifact, Tool}
   "needs_attention": false,  // is_fragile AND staleness.is_stale
+  "priority": {
+    "label": "CRITICAL|HIGH|MEDIUM|LOW|null",  // null exactly when uncertain=true - never a guessed label
+    "tier": "IOC|Artifact|Tool|TTP|null",       // axis 1 - ALWAYS present alongside label, never a bare label
+    "staleness_band": "stale_over_2yr|aging_6mo_to_2yr|fresh_under_6mo|null",  // axis 2
+    "lower_confidence": false,   // true for text-path (Elastic/Splunk) tiers - same signal as fragility.caveat
+    "uncertain": false,          // true if label is null (unscoreable rule, or unresolvable staleness band)
+    "uncertainty_reason": null   // stated reason whenever uncertain=true
+  },
   "triage_hypotheses": []    // UNTESTED Stage 3 labels - never a verdict, see disclosure
 }
 ```
 
 **The `fragility.caveat` field is the machine-readable form of the text-path confidence warning** - any consumer building automation on top of `--json` output must check it before treating a `tier` as high-confidence; it is non-null precisely (and only) when the tier came from the Elastic/Splunk text-only path rather than a Sigma AST walk.
+
+**Priority is a lookup, never a fused score** - `priority.label` is always paired with `priority.tier` and `priority.staleness_band`, the exact two axes that produced it (`mechanic/priority.py::PRIORITY_MATRIX`); no consumer should display `label` without them. `mechanic priority-legend --json` returns the matrix itself (also embedded as `priority_matrix` in every `triage --json` response):
+
+```jsonc
+{
+  "tiers_worst_to_best": ["IOC", "Artifact", "Tool", "TTP"],
+  "staleness_bands_stale_to_fresh": ["stale_over_2yr", "aging_6mo_to_2yr", "fresh_under_6mo"],
+  "labels_worst_to_best": ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+  "cells": [{"tier": "IOC", "staleness_band": "stale_over_2yr", "label": "CRITICAL"}, /* ... 12 total */],
+  "rationale": "..."
+}
+```
 
 `report --json` is `{"scan": <scan output + validate_failures>, "staleness": <staleness output or null>, "staleness_error": "..." or null}`.
 

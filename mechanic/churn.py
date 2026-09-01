@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import mean, median
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from pydriller import Repository
 from pydriller.domain.commit import Commit
@@ -369,7 +369,11 @@ def _modified_files_no_patch(commit: Commit, root: Path) -> list[_FallbackModifi
 
 
 def _mine_commits(
-    root: Path, fmt: RuleFormat, subdir_prefix: Optional[str] = None, single: Optional[str] = None
+    root: Path,
+    fmt: RuleFormat,
+    subdir_prefix: Optional[str] = None,
+    single: Optional[str] = None,
+    progress_cb: Optional[Callable[[int], None]] = None,
 ) -> list[_CommitFacts]:
     """`single`, if given (a commit hash), mines exactly that one commit
     instead of walking the whole history - PyDriller's own `Repository(...,
@@ -377,12 +381,19 @@ def _mine_commits(
     fast even on a huge repo. Used by the Part 4 hardening regression-lock
     test (tests/test_validated_numbers_lock.py) to re-check a specific
     historical mechanical commit's rule-file-touch count without re-mining
-    all of SigmaHQ/Elastic/Splunk's history just to check one commit."""
+    all of SigmaHQ/Elastic/Splunk's history just to check one commit.
+
+    `progress_cb`, if given, is called with a running commit-count roughly
+    every 250 commits (real progress off the actual traversal, not a timer
+    or an estimate - added for the GUI's "mining N commits..." status, does
+    not change what's mined or returned)."""
     extensions = _rule_extensions(fmt)
     exclude_dirs = fmt.exclude_dirs
     facts: list[_CommitFacts] = []
     repo_kwargs = {"single": single} if single else {}
-    for commit in Repository(str(root), **repo_kwargs).traverse_commits():
+    for i, commit in enumerate(Repository(str(root), **repo_kwargs).traverse_commits(), start=1):
+        if progress_cb is not None and i % 250 == 0:
+            progress_cb(i)
         touched: list[str] = []
         renames: list[tuple[str, str]] = []
         file_changes: list[FileChangeFact] = []
@@ -577,7 +588,11 @@ def _current_head(root: Path) -> str:
 
 
 def mine_commits_cached(
-    root: Path, fmt: str = "sigma", subdir: Optional[str] = None, refresh: bool = False
+    root: Path,
+    fmt: str = "sigma",
+    subdir: Optional[str] = None,
+    refresh: bool = False,
+    progress_cb: Optional[Callable[[str, int], None]] = None,
 ) -> list[_CommitFacts]:
     """Disk-cached wrapper around `mine_commits`, keyed by (repo root, fmt,
     subdir, current `git rev-parse HEAD`).
@@ -608,6 +623,12 @@ def mine_commits_cached(
     fixed during the Part 2 hardening pass: these messages used to go to
     stdout and would corrupt --json output on every cache miss), so a fast
     cached run is never mistaken for a fresh mining run or vice versa.
+
+    `progress_cb`, if given, is called with `("cache_hit"|"mining", n)` -
+    once with `("cache_hit", len(cached_facts))` on a hit, or repeatedly
+    with `("mining", commit_count)` while actually mining (see
+    `_mine_commits`). Added for the GUI's real progress display; every
+    core CLI path passes `None` and behaves exactly as before.
     """
     root = Path(root)
     _check_git_preconditions(root)
@@ -630,6 +651,8 @@ def mine_commits_cached(
                 file=sys.stderr,
                 flush=True,
             )
+            if progress_cb is not None:
+                progress_cb("cache_hit", len(cached_facts))
             return cached_facts
         elif cached_facts is not None:
             print(
@@ -641,14 +664,20 @@ def mine_commits_cached(
     else:
         print(f"[mechanic] cache MISS (none found): mining {root} (fmt={fmt}, subdir={subdir}).", file=sys.stderr, flush=True)
 
-    all_facts = mine_commits(root, fmt, subdir=subdir)
+    mine_kwargs = {"progress_cb": lambda n: progress_cb("mining", n)} if progress_cb is not None else {}
+    all_facts = mine_commits(root, fmt, subdir=subdir, **mine_kwargs)
     with open(cache_file, "wb") as f:
         pickle.dump((head, all_facts), f)
     print(f"[mechanic] mined and cached {len(all_facts)} commit-facts at HEAD={head[:10]} -> {cache_file}", file=sys.stderr, flush=True)
     return all_facts
 
 
-def mine_commits(root: Path, fmt: str = "sigma", subdir: Optional[str] = None) -> list[_CommitFacts]:
+def mine_commits(
+    root: Path,
+    fmt: str = "sigma",
+    subdir: Optional[str] = None,
+    progress_cb: Optional[Callable[[int], None]] = None,
+) -> list[_CommitFacts]:
     """Public entry point for a single full-history mining pass.
 
     `compute_staleness`, `mine_organic_touches`, and any caller that also
@@ -660,12 +689,16 @@ def mine_commits(root: Path, fmt: str = "sigma", subdir: Optional[str] = None) -
     is a 3x reduction in git-history walks for Part 3's gathering script,
     which needs all three (staleness aggregation, organic touches for
     semantic diffing, and creation dates) from the same repo in one run.
+
+    `progress_cb`, if given, forwards to `_mine_commits` (a running commit
+    count, roughly every 250 commits) - optional, `None` by default,
+    changes nothing about what's mined or returned.
     """
     root = Path(root)
     _check_git_preconditions(root)
     rule_format = FORMATS[fmt] if isinstance(fmt, str) else fmt
     subdir_prefix = subdir.replace("\\", "/").rstrip("/") if subdir else None
-    all_facts = _mine_commits(root, rule_format, subdir_prefix)
+    all_facts = _mine_commits(root, rule_format, subdir_prefix, progress_cb=progress_cb)
     if not all_facts:
         raise NoGitHistoryError(root)
     return all_facts

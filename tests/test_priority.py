@@ -102,14 +102,24 @@ def repo_with_history(tmp_path: Path, monkeypatch) -> Path:
 def test_no_combined_score_field(repo_with_history: Path):
     """Task 7 found no association reliable enough to fuse the two axes -
     the report/record shape must not expose anything resembling a single
-    priority number."""
+    FUSED priority number. `priority` itself is legitimate (added later,
+    a transparent matrix LOOKUP over the two axes - see
+    tests/test_priority_matrix.py) precisely because it always carries
+    both axis values (`tier`, `staleness_band`) alongside the label,
+    never collapsing them into one opaque number - that's what's asserted
+    here, not the field's absence."""
     report = priority.compute_triage(repo_with_history, "sigma", mechanical_threshold=0.5, as_of=AS_OF)
     d = report.to_dict()
     assert "priority_score" not in d
     for r in report.scoreable:
         rd = r.to_dict()
         assert "score" not in rd
-        assert "priority" not in rd
+        assert isinstance(rd["priority"], dict), "priority must be a {label, tier, staleness_band, ...} record"
+        assert "score" not in rd["priority"]
+        assert "priority_score" not in rd["priority"]
+        # the two axes that produced the label must always be present, not
+        # collapsible to just a bare label
+        assert set(rd["priority"]) >= {"label", "tier", "staleness_band", "uncertain"}
 
 
 def test_never_revised_flagged_distinctly_not_as_large_number(repo_with_history: Path):

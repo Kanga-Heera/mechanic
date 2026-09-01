@@ -41,7 +41,7 @@ import tomllib
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import yaml
 
@@ -205,6 +205,12 @@ class RuleSignals:
         return TIER_RANK.get(self.fragility.tier) if self.fragility.tier else None
 
     @property
+    def priority(self) -> Priority:
+        """CRITICAL/HIGH/MEDIUM/LOW, always paired with the (tier,
+        staleness band) cell that produced it - see `compute_priority`."""
+        return compute_priority(self)
+
+    @property
     def narrative(self) -> str:
         """Human-readable justification, in prose, for where this rule sits.
         This is the output a SOC engineer actually reads - `mechanic explain`
@@ -349,6 +355,7 @@ class RuleSignals:
             "fragility": self.fragility.to_dict(),
             "is_fragile": _is_fragile(self),
             "needs_attention": _is_fragile(self) and _is_stale(self),
+            "priority": self.priority.to_dict(),
             "triage_hypotheses": self.triage_hypotheses,
         }
 
@@ -368,6 +375,159 @@ def _is_stale(sig: RuleSignals) -> bool:
 
 def _is_fragile(sig: RuleSignals) -> bool:
     return sig.fragility.tier in FRAGILE_TIERS
+
+
+# ---------------------------------------------------------------------------
+# Priority: an explicit 2-axis MATRIX, never a fused score.
+#
+# Task 7's pre-registered correlation experiment (module docstring above,
+# RESULTS.md) found no association between staleness and fragility that
+# survives an age control on the one externally-validated corpus - the
+# reason this module has never combined the two axes into one number. A
+# priority *label* is still useful for triage, so it is computed as a
+# transparent LOOKUP over the two axes (a rule's cell in a fixed table),
+# never as a formula that blends them - the axes that produced a label are
+# always shown alongside it (see `Priority.to_dict`), and the table itself
+# is the single, inspectable source of truth below, not buried in code.
+# ---------------------------------------------------------------------------
+
+STALENESS_BANDS = ("stale_over_2yr", "aging_6mo_to_2yr", "fresh_under_6mo")
+PRIORITY_LABELS = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+
+# Row order matters and is deliberate: IOC first (worst), TTP last (best) -
+# this matches TIER_RANK's own ordering (IOC=0 .. TTP=3) and the tier
+# semantics already documented everywhere else in this module (see
+# `RuleSignals.narrative`'s `tier_meaning`: IOC is "the least durable kind
+# of match possible", TTP "the most durable kind of match mechanic
+# recognizes") and the external STP validation itself (RESULTS.md: Kendall's
+# tau-b = 0.361, p = 0.0010 - mechanic's tier rank tracks MITRE's own
+# analytic-robustness score in this direction, not the reverse). A rule
+# matching only on a raw, swappable IOC AND left untouched for 2+ years is
+# the single most urgent combination this tool can surface: maximally
+# evadable, and nobody has looked at it in years - that is the CRITICAL
+# cell, not TTP-tier (mechanic's most durable, hardest-to-evade match).
+PRIORITY_MATRIX: dict[tuple[str, str], str] = {
+    ("IOC", "stale_over_2yr"): "CRITICAL",
+    ("IOC", "aging_6mo_to_2yr"): "HIGH",
+    ("IOC", "fresh_under_6mo"): "MEDIUM",
+    ("Artifact", "stale_over_2yr"): "CRITICAL",
+    ("Artifact", "aging_6mo_to_2yr"): "HIGH",
+    ("Artifact", "fresh_under_6mo"): "MEDIUM",
+    ("Tool", "stale_over_2yr"): "HIGH",
+    ("Tool", "aging_6mo_to_2yr"): "MEDIUM",
+    ("Tool", "fresh_under_6mo"): "LOW",
+    ("TTP", "stale_over_2yr"): "MEDIUM",
+    ("TTP", "aging_6mo_to_2yr"): "LOW",
+    ("TTP", "fresh_under_6mo"): "LOW",
+}
+
+
+def staleness_band(sig: RuleSignals) -> Optional[str]:
+    """One of STALENESS_BANDS, or None if staleness genuinely can't be
+    determined (no creation date could be resolved for this rule - never
+    silently defaulted to a band). Same threshold constants the rest of
+    the module already uses (`churn.STALE_DAYS` = 730d/2yr,
+    `churn.RECENT_DAYS` = 182d/6mo) - not new, not redefined."""
+    days = sig.age_days if sig.never_revised else sig.days_since_behavioral_change
+    if days is None:
+        return None
+    if days > churn.STALE_DAYS:
+        return "stale_over_2yr"
+    if days < churn.RECENT_DAYS:
+        return "fresh_under_6mo"
+    return "aging_6mo_to_2yr"
+
+
+@dataclass
+class Priority:
+    """A rule's priority, ALWAYS carrying the two axis values that produced
+    it - `label` must never be read or displayed without `tier`/`band`
+    alongside it (the CLI and GUI both enforce this; see `to_dict`)."""
+
+    label: Optional[str]  # CRITICAL | HIGH | MEDIUM | LOW | None (uncertain)
+    tier: Optional[str]
+    staleness_band: Optional[str]
+    lower_confidence: bool  # True for text-path (Elastic/Splunk) tiers
+    uncertain: bool  # True whenever `label` should NOT be trusted at face value
+    uncertainty_reason: Optional[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "tier": self.tier,
+            "staleness_band": self.staleness_band,
+            "lower_confidence": self.lower_confidence,
+            "uncertain": self.uncertain,
+            "uncertainty_reason": self.uncertainty_reason,
+        }
+
+
+def compute_priority(sig: RuleSignals) -> Priority:
+    """Look up `sig`'s cell in PRIORITY_MATRIX - a pure function of the two
+    already-computed axes, nothing recomputed or estimated. Uncertainty
+    (an unscoreable rule, or a staleness band that can't be determined) is
+    surfaced as `uncertain=True` with a stated reason and `label=None`,
+    never smoothed into a confident-looking label - the same discipline
+    the Stage 3 gate's `fully_exercised` flag applies to repair
+    verdicts, applied here to priority instead."""
+    f = sig.fragility
+    band = staleness_band(sig)
+    lower_confidence = bool(f.caveat)
+
+    if f.unscoreable or f.tier is None:
+        return Priority(
+            label=None,
+            tier=None,
+            staleness_band=band,
+            lower_confidence=lower_confidence,
+            uncertain=True,
+            uncertainty_reason=f.unscoreable_reason or "fragility tier could not be assigned",
+        )
+    if band is None:
+        return Priority(
+            label=None,
+            tier=f.tier,
+            staleness_band=None,
+            lower_confidence=lower_confidence,
+            uncertain=True,
+            uncertainty_reason="staleness band unknown: no creation date could be resolved for this rule",
+        )
+    label = PRIORITY_MATRIX[(f.tier, band)]
+    return Priority(
+        label=label,
+        tier=f.tier,
+        staleness_band=band,
+        lower_confidence=lower_confidence,
+        uncertain=False,
+        uncertainty_reason=None,
+    )
+
+
+def priority_matrix_schema() -> dict[str, Any]:
+    """The matrix itself, in a shape a GUI legend (or any other consumer)
+    can render directly without hard-coding the cell values a second
+    time - `mechanic triage --json`'s top-level `priority_matrix` key is
+    exactly this."""
+    tiers_worst_to_best = ["IOC", "Artifact", "Tool", "TTP"]
+    return {
+        "tiers_worst_to_best": tiers_worst_to_best,
+        "staleness_bands_stale_to_fresh": list(STALENESS_BANDS),
+        "labels_worst_to_best": list(PRIORITY_LABELS),
+        "cells": [
+            {"tier": tier, "staleness_band": band, "label": PRIORITY_MATRIX[(tier, band)]}
+            for tier in tiers_worst_to_best
+            for band in STALENESS_BANDS
+        ],
+        "rationale": (
+            "Priority is a lookup over two independent, separately-reported axes "
+            "(fragility tier x staleness band), never a blended/fused score - Task 7's "
+            "pre-registered correlation experiment found no association between them "
+            "that survives an age control (RESULTS.md), so a formula combining them "
+            "would manufacture false precision. IOC is the worst (least durable) "
+            "fragility tier and TTP the best (most durable), matching mechanic's "
+            "STP-validated tier ordering (Kendall's tau-b = 0.361, p = 0.0010)."
+        ),
+    }
 
 
 @dataclass
@@ -402,6 +562,22 @@ class TriageReport:
                 counts[h] = counts.get(h, 0) + 1
         return counts
 
+    def priority_breakdown(self) -> dict[str, int]:
+        """Counts of CRITICAL/HIGH/MEDIUM/LOW across every discovered rule
+        (scoreable + unscoreable), plus how many have no label at all
+        because priority was genuinely uncertain (an unscoreable rule, or
+        an unresolvable staleness band) - never folded silently into one
+        of the four labels. Always sums to `rule_count`."""
+        counts: dict[str, int] = {label: 0 for label in PRIORITY_LABELS}
+        counts["UNCERTAIN"] = 0
+        for r in self.scoreable + self.unscoreable:
+            p = r.priority
+            if p.uncertain or p.label is None:
+                counts["UNCERTAIN"] += 1
+            else:
+                counts[p.label] += 1
+        return counts
+
     def sorted_scoreable(self, ordering: str = "tier_first") -> list[RuleSignals]:
         """Practical scan order, NOT a validated priority score (see module
         docstring: Task 7 found no association reliable enough to fuse these
@@ -420,7 +596,13 @@ class TriageReport:
         a tie-break. Reported in RESULTS.md's threshold/ordering-sensitivity
         section via rank correlation against `"tier_first"`, the same way an
         alternative weighting's effect would be reported if a combined score
-        existed."""
+        existed.
+
+        `"priority_first"`: sorts by the PRIORITY MATRIX label
+        (CRITICAL..LOW, uncertain last) - still not a fused score, just a
+        third unweighted lookup-based ordering, since the label is itself a
+        pure lookup over the same two axes (see `compute_priority`), not a
+        new number."""
         if ordering == "staleness_first":
             return sorted(
                 self.scoreable,
@@ -428,6 +610,17 @@ class TriageReport:
                     0 if r.never_revised else 1,
                     -(r.days_since_behavioral_change or r.age_days or 0),
                     r.tier_rank if r.tier_rank is not None else 99,
+                ),
+            )
+        if ordering == "priority_first":
+            label_rank = {label: i for i, label in enumerate(PRIORITY_LABELS)}
+            return sorted(
+                self.scoreable,
+                key=lambda r: (
+                    label_rank.get(r.priority.label, 99),
+                    r.tier_rank if r.tier_rank is not None else 99,
+                    0 if r.never_revised else 1,
+                    -(r.days_since_behavioral_change or r.age_days or 0),
                 ),
             )
         return sorted(
@@ -453,6 +646,8 @@ class TriageReport:
             "unscoreable_count": len(self.unscoreable),
             "summary": self.one_line_summary(),
             "bucket_counts": self.bucket_counts(),
+            "priority_breakdown": self.priority_breakdown(),
+            "priority_matrix": priority_matrix_schema(),
             "disclosure": self.disclosure,
             "rules": [r.to_dict() for r in ordered],
             "unscoreable": [r.to_dict() for r in self.unscoreable],
@@ -503,6 +698,7 @@ def compute_triage(
     as_of: Optional[date] = None,
     all_facts: Optional[list] = None,
     refresh: bool = False,
+    progress_cb: Optional[Callable[[str, int, int], None]] = None,
 ) -> TriageReport:
     """Single entry point: mines git history once (from a disk cache when
     available - see `churn.mine_commits_cached`), runs staleness + semantic
@@ -523,12 +719,28 @@ def compute_triage(
     `refresh=True` forces `mine_commits_cached` to re-mine regardless of
     cache state (wired to `mechanic triage --refresh` / `mechanic explain
     --refresh`); ignored if `all_facts` is supplied directly.
+
+    `progress_cb`, if given, is called `(stage, done, total)` at each real
+    checkpoint - `("cache_hit"|"mining", n, 0)` during history mining (from
+    `churn.mine_commits_cached`; `total` unknown, always 0), then
+    `("staleness", 0, 1)`, `("semantic_diff", 0, 1)`, then repeatedly
+    `("classifying", i, total_rules)` through the per-rule fragility pass
+    (the slowest part at corpus scale - Stage 1 Part 1 / Stage 2 Part 2
+    both do real work per rule). Built for the GUI's real progress display
+    (QUICKSTART.md's "honest timing note"); `None` by default, and every
+    existing core CLI call site passes nothing, so behavior and output are
+    byte-for-byte unchanged when it's not used.
     """
     root = Path(path)
     as_of = as_of or date.today()
     if all_facts is None:
-        all_facts = churn.mine_commits_cached(root, fmt, subdir=subdir, refresh=refresh)
+        mining_cb = (lambda stage, n: progress_cb(stage, n, 0)) if progress_cb is not None else None
+        all_facts = churn.mine_commits_cached(root, fmt, subdir=subdir, refresh=refresh, progress_cb=mining_cb)
+    if progress_cb is not None:
+        progress_cb("staleness", 0, 1)
     staleness_report = churn.compute_staleness(root, fmt, mechanical_threshold, as_of=as_of, subdir=subdir, all_facts=all_facts)
+    if progress_cb is not None:
+        progress_cb("semantic_diff", 0, 1)
     diff_report = semantic_diff.compute_semantic_diff(
         root, fmt, mechanical_threshold, subdir=subdir, as_of=as_of, staleness_report=staleness_report, all_facts=all_facts
     )
@@ -549,7 +761,10 @@ def compute_triage(
     fragility_fn = _FRAGILITY_FN[fmt]
     scoreable: list[RuleSignals] = []
     unscoreable: list[RuleSignals] = []
-    for r in enriched.rules:
+    total_rules = len(enriched.rules)
+    for i, r in enumerate(enriched.rules):
+        if progress_cb is not None and (i % 20 == 0 or i == total_rules - 1):
+            progress_cb("classifying", i + 1, total_rules)
         full_path = root / r.file
         frag = fragility_fn(full_path)
         creation_date = earliest.get(r.file)
