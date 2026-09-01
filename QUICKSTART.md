@@ -177,16 +177,34 @@ Every command above completed correctly and produced the numbers shown -
 nothing was skipped or approximated. What's disclosed plainly here because
 it's real, observed behavior on this corpus, not because anything went
 wrong: `staleness`/`triage`/`explain` on SigmaHQ's full 3,144-rule `rules/`
-directory take **a few minutes wall-clock**, even with git-history mining
-served from a warm cache - the semantic-diff and per-rule fragility
-classification passes (Stage 1 Part 1 / Stage 2 Part 2) do real, non-trivial
-work per rule, and 3,144 rules is a lot of rules. This is unchanged,
-pre-existing behavior (not something this hardening pass introduced or
-regressed) - and it is why the git-history-mining CACHE exists in the first
-place (`--refresh` to force a re-mine, omitted otherwise). For a large
-corpus, budget a few minutes for the first `triage`/`explain` invocation in
-a session; nothing here hangs or crashes, it is genuinely working through
-3,144 rules' worth of AST classification and commit-history diffing.
+directory take **several minutes wall-clock**, even with git-history mining
+served from a warm cache. This is unchanged, pre-existing behavior (not
+something the hardening pass or the GUI introduced or regressed) - and it
+is why the git-history-mining CACHE exists in the first place (`--refresh`
+to force a re-mine, omitted otherwise).
+
+**Real, measured breakdown** (via the GUI's per-stage progress reporting,
+same pinned commit, warm mining cache): a full run took **635 seconds
+(~10.6 minutes)** end to end, and the cost is **not evenly spread**:
+
+| Stage | Wall-clock | Share |
+|---|---:|---:|
+| Mining (cache hit) | ~0s | 0% |
+| Staleness | ~4s | 0.6% |
+| **Semantic diff (behavioral vs. cosmetic classification)** | **~591s** | **~93%** |
+| Fragility classification (all 3,144 rules) | ~39s | ~6% |
+
+**Semantic diff so dominates the total that fragility classification -
+the part that scales with rule *count* - is almost a rounding error by
+comparison.** Per-rule fragility classification alone finished all 3,144
+rules in under 40 seconds; the other ~10 minutes is Part 1's behavioral-
+vs-cosmetic git-blob diffing, which does real work per *organic commit*
+in the mined history, not per rule. For a large, heavily-revised corpus
+like SigmaHQ, budget most of the wait for that stage specifically, not
+classification. Nothing here hangs or crashes; the GUI's progress display
+(`docs/gui-notes.md`) shows this breakdown live rather than a single
+opaque spinner, precisely because a bare "loading…" over a 10-minute wait
+would itself be a readability failure.
 
 `mechanic scan` (no git involved at all, pure YAML load) stays fast
 regardless of corpus size - see `tests/test_loader_adversarial.py`'s
