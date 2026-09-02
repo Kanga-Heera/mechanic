@@ -30,6 +30,11 @@ thirdparty/
 # (a placeholder, no real key) is the only committed reference.
 .env
 
+# Generated triage exports (mechanic triage --json/CSV dumps of a real
+# repo's results, e.g. exports/sigma_triage_*.json) - regenerable output,
+# not source, and too large/repo-specific to belong in version control.
+exports/
+
 # Stage 3: the pinned RSigma binary itself is not source - see
 # docs/stage3-harness-evaluation.md for the pinned version (v0.21.0) and
 # checksum-verified download instructions. Kept outside this repo at

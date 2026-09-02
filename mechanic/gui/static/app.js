@@ -233,7 +233,8 @@ document.getElementById("legend-overlay").addEventListener("click", (e) => {
 });
 
 function renderLegend(legend) {
-  document.getElementById("legend-rationale").textContent = legend.rationale;
+  document.getElementById("legend-rationale").textContent =
+    legend.rationale_plain || legend.rationale;
   const table = document.getElementById("legend-table");
   table.innerHTML = "";
   const thead = el("tr", null, [el("th", null, ["tier \\ staleness"])]);

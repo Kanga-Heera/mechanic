@@ -527,6 +527,21 @@ def priority_matrix_schema() -> dict[str, Any]:
             "fragility tier and TTP the best (most durable), matching mechanic's "
             "STP-validated tier ordering (Kendall's tau-b = 0.361, p = 0.0010)."
         ),
+        # Same fact as `rationale` above, said in plain language for a UI
+        # legend - not a different rule, just a shorter one. Kept separate
+        # so the technical `rationale` (asserted on by
+        # tests/test_priority_matrix.py) never has to trade precision for
+        # readability, or vice versa.
+        "rationale_plain": (
+            "Two separate signals, never combined into one score: HOW the rule matches "
+            "(fragility - can an attacker dodge it by changing one detail?) and "
+            "WHEN it was last actually revised (staleness). We tested whether these "
+            "two move together and found they don't, so averaging or weighting them "
+            "into a single number would just be a guess dressed up as a metric. "
+            "Worst fragility is a raw indicator (IP, hash, filename) that's trivial "
+            "to swap out; best is behavior an attacker can't easily avoid without "
+            "changing what they actually do."
+        ),
     }
 
 
