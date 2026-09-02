@@ -17,6 +17,7 @@ tests/test_gui_offline.py.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -53,7 +54,12 @@ class Job:
     done: int = 0
     total: int = 0
     error: Optional[str] = None
-    report: Optional[priority.TriageReport] = None
+    # A live-computed job's report is a TriageReport (its own .to_dict()
+    # does the ordering/top_n work below). A job loaded verbatim from a
+    # previously-exported `--json` file (see /api/load-from-report) stores
+    # the parsed dict directly instead - already exactly that same shape,
+    # nothing left to compute.
+    report: Optional[Any] = None
     all_facts: Optional[list] = None  # kept only for the rule-history endpoint below
     created_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
@@ -166,6 +172,28 @@ class LoadRequest(BaseModel):
     refresh: bool = False
 
 
+class LoadFromReportRequest(BaseModel):
+    report_path: str
+    subdir: Optional[str] = None
+
+
+def _mine_for_history_async(job: Job, root: Path) -> None:
+    """Best-effort, off the request thread: populate `job.all_facts` so
+    the rule-history tab works for a job loaded from a saved report (see
+    /api/load-from-report). Same disk-cache-aware call `compute_triage`
+    itself would make - a cache HIT when the repo hasn't moved since the
+    report was produced (the expected case), not a fresh mine. Failure
+    here is non-fatal: rule-history just reports "not finished yet"
+    forever for this job, same as any other job whose mining is still in
+    flight - Overview and Source stay fully available either way."""
+    try:
+        facts = churn.mine_commits_cached(root, job.fmt, subdir=job.subdir)
+        with _JOBS_LOCK:
+            job.all_facts = facts
+    except Exception:  # noqa: BLE001 - best-effort only, never crashes the server
+        pass
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="mechanic GUI", docs_url=None, redoc_url=None)
 
@@ -185,6 +213,40 @@ def create_app() -> FastAPI:
             _JOBS[job.id] = job
         thread = threading.Thread(target=_run_job, args=(job,), daemon=True)
         thread.start()
+        return {"job_id": job.id}
+
+    @app.post("/api/load-from-report")
+    def load_from_report(req: LoadFromReportRequest) -> dict[str, Any]:
+        """Load a report file previously produced by `mechanic triage
+        --json` (this same core engine) VERBATIM - for a corpus already
+        computed once (e.g. from the CLI, or by hand outside this tab).
+        No recomputation: the file's own JSON becomes the job's result
+        unmodified. Only the rule-history tab needs anything beyond that
+        file's content, and it's filled in the background, non-blocking
+        (see `_mine_for_history_async`)."""
+        report_file = Path(req.report_path)
+        if not report_file.is_file():
+            raise HTTPException(400, f"Not a file: {req.report_path}")
+        try:
+            data = json.loads(report_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            raise HTTPException(400, f"Could not read/parse report file: {e}")
+        if not isinstance(data, dict) or "rules" not in data or "root" not in data:
+            raise HTTPException(400, "Not a mechanic triage report (missing 'root'/'rules').")
+        root = Path(data["root"])
+        job = Job(
+            id=uuid.uuid4().hex[:12],
+            path=str(root),
+            fmt=data.get("fmt", "sigma"),
+            subdir=req.subdir,
+            mechanical_threshold=data.get("mechanical_threshold", churn.DEFAULT_THRESHOLD),
+            status="done",
+            report=data,
+            finished_at=time.time(),
+        )
+        with _JOBS_LOCK:
+            _JOBS[job.id] = job
+        threading.Thread(target=_mine_for_history_async, args=(job, root), daemon=True).start()
         return {"job_id": job.id}
 
     @app.get("/api/jobs/{job_id}")
@@ -209,6 +271,14 @@ def create_app() -> FastAPI:
                 raise HTTPException(422, job.error or "job failed")
             if job.status != "done" or job.report is None:
                 raise HTTPException(425, f"job not finished yet (status={job.status})")
+            if isinstance(job.report, dict):
+                # Loaded verbatim from a file - already this exact shape.
+                # `ordering`/`top_n` aren't re-applied server-side (no
+                # TriageReport object to ask); the frontend already
+                # re-sorts/filters every row client-side regardless of
+                # what order a fetch arrived in, so this only affects
+                # which order rows are logically listed in, never a value.
+                return job.report
             return job.report.to_dict(top_n=top_n, ordering=ordering)
 
     @app.get("/api/jobs/{job_id}/rule")
@@ -222,10 +292,14 @@ def create_app() -> FastAPI:
             if job.status != "done" or job.report is None:
                 raise HTTPException(425, f"job not finished yet (status={job.status})")
             report = job.report
-        match = next((r for r in report.scoreable + report.unscoreable if r.file == file), None)
+        if isinstance(report, dict):
+            match = next((r for r in report["rules"] + report["unscoreable"] if r["file"] == file), None)
+        else:
+            found = next((r for r in report.scoreable + report.unscoreable if r.file == file), None)
+            match = found.to_dict() if found is not None else None
         if match is None:
             raise HTTPException(404, f"rule not found in this job's report: {file}")
-        return match.to_dict()
+        return match
 
     @app.get("/api/jobs/{job_id}/rule-source")
     def rule_source(job_id: str, file: str = Query(...)) -> dict[str, Any]:

@@ -656,3 +656,15 @@ document.addEventListener("keydown", (e) => {
 // ---------------- init ----------------
 
 renderRecent();
+
+// Resume an already-created job from a `?job=<id>` link (e.g. one handed
+// back after loading a large corpus outside this tab) - same poll/render
+// path a form submission uses, just skipping the POST that would start a
+// second, redundant computation of the same repo.
+(function resumeJobFromUrl() {
+  const jobId = new URLSearchParams(location.search).get("job");
+  if (!jobId) return;
+  state.jobId = jobId;
+  showProgress(true);
+  pollJob(jobId, null);
+})();
