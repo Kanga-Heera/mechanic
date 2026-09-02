@@ -735,16 +735,24 @@ def compute_triage(
     cache state (wired to `mechanic triage --refresh` / `mechanic explain
     --refresh`); ignored if `all_facts` is supplied directly.
 
-    `progress_cb`, if given, is called `(stage, done, total)` at each real
-    checkpoint - `("cache_hit"|"mining", n, 0)` during history mining (from
-    `churn.mine_commits_cached`; `total` unknown, always 0), then
-    `("staleness", 0, 1)`, `("semantic_diff", 0, 1)`, then repeatedly
-    `("classifying", i, total_rules)` through the per-rule fragility pass
-    (the slowest part at corpus scale - Stage 1 Part 1 / Stage 2 Part 2
-    both do real work per rule). Built for the GUI's real progress display
-    (QUICKSTART.md's "honest timing note"); `None` by default, and every
-    existing core CLI call site passes nothing, so behavior and output are
-    byte-for-byte unchanged when it's not used.
+    `progress_cb`, if given, is called `(stage, done, total, detail="")` at
+    each real checkpoint - `("cache_hit"|"mining", n, 0)` during history
+    mining (from `churn.mine_commits_cached`; `total` unknown, always 0),
+    then `("staleness", 0, 1)`, then repeatedly `("semantic_diff", done,
+    total, canonical_file)` through the per-touch behavioral diff pass (the
+    dominant cost at corpus scale - ~93% of a full SigmaHQ run, see
+    QUICKSTART.md's "honest timing note"), then repeatedly `("classifying",
+    i, total_rules, rule_file)` through the per-rule fragility pass. `detail`
+    is always the 4th positional arg but every stage before semantic_diff
+    passes it implicitly via the callback's own default, so a callback
+    defined as `def cb(stage, done, total, detail=""): ...` handles every
+    call uniformly. A callback that raises out of a call aborts the whole
+    computation at that checkpoint (the GUI uses this for its Stop button -
+    see `mechanic/gui/server.py`); this function does nothing special with
+    that beyond letting the exception propagate, same as any other error.
+    `None` by default, and every existing core CLI call site passes
+    nothing, so behavior and output are byte-for-byte unchanged when it's
+    not used.
     """
     root = Path(path)
     as_of = as_of or date.today()
@@ -757,7 +765,18 @@ def compute_triage(
     if progress_cb is not None:
         progress_cb("semantic_diff", 0, 1)
     diff_report = semantic_diff.compute_semantic_diff(
-        root, fmt, mechanical_threshold, subdir=subdir, as_of=as_of, staleness_report=staleness_report, all_facts=all_facts
+        root,
+        fmt,
+        mechanical_threshold,
+        subdir=subdir,
+        as_of=as_of,
+        staleness_report=staleness_report,
+        all_facts=all_facts,
+        progress_cb=(
+            (lambda done, total, detail: progress_cb("semantic_diff", done, total, detail))
+            if progress_cb is not None
+            else None
+        ),
     )
     enriched = diff_report.staleness or staleness_report
 
@@ -779,7 +798,7 @@ def compute_triage(
     total_rules = len(enriched.rules)
     for i, r in enumerate(enriched.rules):
         if progress_cb is not None and (i % 20 == 0 or i == total_rules - 1):
-            progress_cb("classifying", i + 1, total_rules)
+            progress_cb("classifying", i + 1, total_rules, r.file)
         full_path = root / r.file
         frag = fragility_fn(full_path)
         creation_date = earliest.get(r.file)

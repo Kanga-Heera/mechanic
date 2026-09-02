@@ -7,7 +7,10 @@ section for the table and its documented rationale.
 
 from __future__ import annotations
 
+import os
+import subprocess
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -200,3 +203,109 @@ def test_priority_matrix_schema_is_pure_no_inputs():
     a = priority_matrix_schema()
     b = priority_matrix_schema()
     assert a == b
+
+
+def test_priority_matrix_schema_has_a_plain_language_rationale_too():
+    """The GUI legend modal shows `rationale_plain`, not `rationale` (see
+    app.js's renderLegend) - it must exist, differ from the technical
+    version, and actually be jargon-free (not just a shorter copy of the
+    same sentences)."""
+    schema = priority_matrix_schema()
+    assert schema["rationale_plain"]
+    assert schema["rationale_plain"] != schema["rationale"]
+    for jargon in ("Task 7", "STP", "Kendall", "0.361", "RESULTS.md"):
+        assert jargon not in schema["rationale_plain"], jargon
+
+
+# --- compute_triage()'s progress_cb: the "detail" 4th arg -------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def _commit(repo: Path, msg: str, date: str) -> None:
+    env = {**os.environ, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+    _git(repo, "add", "-A")
+    subprocess.run(["git", "commit", "-q", "-m", msg], cwd=repo, check=True, capture_output=True, env=env)
+
+
+@pytest.fixture
+def revised_repo(tmp_path: Path) -> Path:
+    """One rule, created then behaviorally revised once, plus enough
+    filler rules that the revision commit (1 file touched) stays under
+    the default 10% mechanical-commit threshold - a single-rule repo's
+    revision commit would touch 100% of the current rule count and get
+    excluded as "mechanical" (a real, documented quirk of that filter at
+    small corpus scale, not a bug). Needed so compute_triage's
+    semantic_diff stage has a real (non-creation) touch to report
+    progress on."""
+    repo = tmp_path / "repo"
+    (repo / "rules").mkdir(parents=True)
+    _git(repo.parent, "init", "-q", str(repo))
+    _git(repo, "config", "user.email", "a@example.com")
+    _git(repo, "config", "user.name", "A")
+    rule = (
+        "title: Suspicious Certutil Download\n"
+        "id: 11111111-1111-1111-1111-111111111111\nstatus: test\n"
+        "logsource:\n  category: process_creation\n  product: windows\n"
+        "detection:\n  selection:\n    Image|endswith: '\\certutil.exe'\n"
+        "  condition: selection\n"
+    )
+    (repo / "rules" / "target.yml").write_text(rule)
+    for i in range(10):
+        (repo / "rules" / f"filler{i}.yml").write_text(
+            f"title: Filler {i}\nid: 2222222{i}-2222-2222-2222-222222222222\nstatus: test\n"
+            "logsource:\n  category: process_creation\n  product: windows\n"
+            "detection:\n  selection:\n    Image|endswith: '\\filler.exe'\n  condition: selection\n"
+        )
+    _commit(repo, "add rules", "2023-01-01T00:00:00")
+    (repo / "rules" / "target.yml").write_text(
+        rule.replace("condition: selection", "condition: selection2\n  selection2:\n    CommandLine|contains: '-urlcache'")
+    )
+    _commit(repo, "widen detection", "2023-06-01T00:00:00")
+    return repo
+
+
+def test_compute_triage_progress_cb_reports_detail_for_semantic_diff_and_classifying(revised_repo: Path):
+    """`detail` (the 4th positional arg) is what the GUI's live "-> currently
+    analyzing <file>" line reads - proves compute_triage actually bridges
+    semantic_diff's per-touch callback and the per-rule classifying loop
+    into its own (stage, done, total, detail) contract, not just the 3
+    original positional args."""
+    calls: list[tuple[str, int, int, str]] = []
+    priority.compute_triage(
+        revised_repo,
+        "sigma",
+        subdir="rules",
+        progress_cb=lambda stage, done, total, detail="": calls.append((stage, done, total, detail)),
+    )
+    semantic_diff_calls = [c for c in calls if c[0] == "semantic_diff" and c[3]]
+    classifying_calls = [c for c in calls if c[0] == "classifying" and c[3]]
+    assert semantic_diff_calls, "expected at least one semantic_diff call carrying a non-empty detail"
+    assert semantic_diff_calls[0][3] == "rules/target.yml"
+    assert classifying_calls, "expected at least one classifying call carrying a non-empty detail"
+    # Every rule gets a callback (total_rules=11 is small enough that the
+    # "every 20th" throttle never skips one) - real per-item detail, not a
+    # static placeholder, so target.yml must show up among them somewhere.
+    assert "rules/target.yml" in {c[3] for c in classifying_calls}
+    assert len({c[3] for c in classifying_calls}) > 1
+    # Every call must be exactly (stage, done, total, detail) - a 3-arg-only
+    # callback (the pre-existing contract) would already have raised
+    # inside compute_triage if this ever regressed to fewer/more args.
+
+
+def test_compute_triage_progress_cb_raising_aborts_the_whole_computation(revised_repo: Path):
+    """Same exception-propagation contract as compute_semantic_diff's own
+    progress_cb (see test_semantic_diff.py) - this is what the GUI's Stop
+    button relies on end to end, through compute_triage's bridging too."""
+
+    class _Stop(Exception):
+        pass
+
+    def cb(stage: str, done: int, total: int, detail: str = "") -> None:
+        if stage == "semantic_diff" and detail:
+            raise _Stop()
+
+    with pytest.raises(_Stop):
+        priority.compute_triage(revised_repo, "sigma", subdir="rules", progress_cb=cb)

@@ -20,7 +20,7 @@ pytest.importorskip("httpx", reason="GUI tests need httpx for FastAPI's TestClie
 from fastapi.testclient import TestClient  # noqa: E402
 
 from mechanic import priority  # noqa: E402
-from mechanic.gui.server import STATIC_DIR, create_app  # noqa: E402
+from mechanic.gui.server import STATIC_DIR, Job, _run_job, create_app  # noqa: E402
 
 GUI_DIR = Path(__file__).parent.parent / "mechanic" / "gui"
 
@@ -292,3 +292,75 @@ def test_zero_rules_directory_does_not_crash(client: TestClient, tmp_path: Path)
     job_id = _load_and_wait(client, repo, subdir="rules")
     status = client.get(f"/api/jobs/{job_id}").json()
     assert status["status"] in ("done", "error")  # never hangs, never crashes the server
+
+
+# --- Stop button: cancellation, and the live "detail" field ---------------
+
+
+def test_job_status_dict_includes_detail_field(client: TestClient, small_repo: Path):
+    job_id = _load_and_wait(client, small_repo)
+    status = client.get(f"/api/jobs/{job_id}").json()
+    assert "detail" in status  # present even once done (empty by then is fine)
+
+
+def test_run_job_stops_immediately_when_cancel_already_requested(small_repo: Path):
+    """Unit-level, no threading/HTTP races: pre-set the cancel flag, run
+    the job function directly, and check it lands on "cancelled" rather
+    than running compute_triage to completion or dying as a generic
+    "error". This is what `POST /api/jobs/{id}/cancel` relies on - it
+    just sets this same flag on a job already running in its own thread."""
+    job = Job(id="t1", path=str(small_repo), fmt="sigma", subdir="rules", mechanical_threshold=0.10)
+    job.cancel_requested.set()
+    _run_job(job)
+    assert job.status == "cancelled"
+    assert job.report is None
+    assert job.finished_at is not None
+
+
+def test_cancel_endpoint_unknown_job_404(client: TestClient):
+    assert client.post("/api/jobs/does-not-exist/cancel").status_code == 404
+
+
+def test_cancel_endpoint_on_finished_job_is_a_safe_noop(client: TestClient, small_repo: Path):
+    """Cancelling a job that already finished can't un-finish it - the
+    endpoint just returns its (unchanged) terminal status rather than
+    erroring or corrupting the result."""
+    job_id = _load_and_wait(client, small_repo)
+    before = client.get(f"/api/jobs/{job_id}").json()
+    assert before["status"] == "done"
+    resp = client.post(f"/api/jobs/{job_id}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "done"
+    # The already-fetched result is still there, untouched.
+    assert client.get(f"/api/jobs/{job_id}/result").status_code == 200
+
+
+def test_result_after_cancel_returns_422_not_425_forever(client: TestClient, small_repo: Path):
+    job = Job(id="t2", path=str(small_repo), fmt="sigma", subdir="rules", mechanical_threshold=0.10)
+    job.cancel_requested.set()
+    _run_job(job)
+    from mechanic.gui import server as server_module
+
+    with server_module._JOBS_LOCK:
+        server_module._JOBS[job.id] = job
+    resp = client.get(f"/api/jobs/{job.id}/result")
+    assert resp.status_code == 422
+    assert "cancel" in resp.json()["detail"].lower()
+
+
+def test_cancel_via_http_reaches_a_terminal_state(client: TestClient, small_repo: Path):
+    """Best-effort end-to-end smoke test through the real HTTP + threading
+    stack (racy by nature on a tiny/fast repo, same style as
+    test_result_before_done_returns_425): whichever of the two legitimate
+    outcomes wins the race, the server must not hang or 500."""
+    resp = client.post("/api/load", json={"path": str(small_repo), "fmt": "sigma", "subdir": "rules"})
+    job_id = resp.json()["job_id"]
+    client.post(f"/api/jobs/{job_id}/cancel")
+    deadline = time.time() + 10.0
+    status = "pending"
+    while time.time() < deadline:
+        status = client.get(f"/api/jobs/{job_id}").json()["status"]
+        if status in ("done", "cancelled", "error"):
+            break
+        time.sleep(0.05)
+    assert status in ("done", "cancelled", "error")

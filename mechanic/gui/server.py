@@ -36,6 +36,14 @@ from mechanic import churn, priority
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+class JobCancelled(Exception):
+    """Raised from inside a Job's `progress_cb` when its Stop button has
+    been clicked - not a core concept, purely a GUI-level signal. Raising
+    it from the callback is enough: `compute_triage`/`compute_semantic_diff`
+    do nothing special with it, the exception just propagates up and aborts
+    the computation at the next checkpoint, same as any other error would."""
+
+
 # ---------------------------------------------------------------------------
 # Job bookkeeping - a background thread per repo load, polled by the
 # frontend. No analysis happens here; this only tracks progress and stores
@@ -50,10 +58,12 @@ class Job:
     fmt: str
     subdir: Optional[str]
     mechanical_threshold: float
-    status: str = "pending"  # pending|mining|staleness|semantic_diff|classifying|done|error
+    status: str = "pending"  # pending|mining|staleness|semantic_diff|classifying|done|cancelled|error
     done: int = 0
     total: int = 0
+    detail: str = ""  # e.g. the file currently being diffed/classified
     error: Optional[str] = None
+    cancel_requested: threading.Event = field(default_factory=threading.Event)
     # A live-computed job's report is a TriageReport (its own .to_dict()
     # does the ordering/top_n work below). A job loaded verbatim from a
     # previously-exported `--json` file (see /api/load-from-report) stores
@@ -70,6 +80,7 @@ class Job:
             "status": self.status,
             "done": self.done,
             "total": self.total,
+            "detail": self.detail,
             "error": self.error,
             "path": self.path,
             "elapsed_seconds": round((self.finished_at or time.time()) - self.created_at, 1),
@@ -81,11 +92,14 @@ _JOBS_LOCK = threading.Lock()
 
 
 def _run_job(job: Job) -> None:
-    def progress_cb(stage: str, done: int, total: int) -> None:
+    def progress_cb(stage: str, done: int, total: int, detail: str = "") -> None:
+        if job.cancel_requested.is_set():
+            raise JobCancelled()
         with _JOBS_LOCK:
             job.status = "mining" if stage in ("mining", "cache_hit") else stage
             job.done = done
             job.total = total
+            job.detail = detail
 
     try:
         root = Path(job.path)
@@ -109,6 +123,10 @@ def _run_job(job: Job) -> None:
             job.report = report
             job.all_facts = all_facts
             job.status = "done"
+            job.finished_at = time.time()
+    except JobCancelled:
+        with _JOBS_LOCK:
+            job.status = "cancelled"
             job.finished_at = time.time()
     except churn.ChurnError as e:
         # The core's own LOUD failure (no .git, shallow clone, etc.) -
@@ -249,6 +267,24 @@ def create_app() -> FastAPI:
         threading.Thread(target=_mine_for_history_async, args=(job, root), daemon=True).start()
         return {"job_id": job.id}
 
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str) -> dict[str, Any]:
+        """Ask a running job to stop. Cooperative, not instant: the job
+        thread only notices at its next `progress_cb` checkpoint (see
+        `JobCancelled` above) - during the dominant semantic-diff stage
+        that's before the next file is diffed, so in practice this is
+        responsive; during the (fast) staleness stage it can lag up to
+        that stage's own few seconds. A job already done/errored/cancelled
+        is left alone - this can't undo a finished result."""
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(404, "unknown job_id")
+            if job.status in ("done", "error", "cancelled"):
+                return job.status_dict()
+            job.cancel_requested.set()
+        return job.status_dict()
+
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str) -> dict[str, Any]:
         with _JOBS_LOCK:
@@ -269,6 +305,8 @@ def create_app() -> FastAPI:
                 raise HTTPException(404, "unknown job_id")
             if job.status == "error":
                 raise HTTPException(422, job.error or "job failed")
+            if job.status == "cancelled":
+                raise HTTPException(422, "cancelled by user")
             if job.status != "done" or job.report is None:
                 raise HTTPException(425, f"job not finished yet (status={job.status})")
             if isinstance(job.report, dict):

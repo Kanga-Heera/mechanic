@@ -243,3 +243,50 @@ def test_behavioral_staleness_summary_matches_convention(bucket_repo: Path):
     assert summary["rule_count"] == 12
     # 10 bulk rules (never behaviorally touched) + new_rule.yml (only created) = 11
     assert summary["rules_with_no_behavioral_history"] == 11
+
+
+# --- progress_cb: per-touch reporting, and cancellation-by-exception ----
+
+
+def test_progress_cb_called_once_per_diffable_touch(bucket_repo: Path):
+    """The GUI's live "-> currently analyzing <file>" display and its Stop
+    button both depend on this firing per touch, not just once at the
+    start/end of the whole pass - `bucket_repo` has exactly 3 diffable
+    (non-creation) touches, all on target.yml."""
+    staleness = churn.compute_staleness(bucket_repo, fmt="sigma", mechanical_threshold=0.10)
+    calls: list[tuple[int, int, str]] = []
+    semantic_diff.compute_semantic_diff(
+        bucket_repo,
+        fmt="sigma",
+        staleness_report=staleness,
+        progress_cb=lambda done, total, detail: calls.append((done, total, detail)),
+    )
+    assert len(calls) == 3
+    assert [done for done, _, _ in calls] == [0, 1, 2]
+    assert all(total == 3 for _, total, _ in calls)
+    assert all(detail == "rules/target.yml" for _, _, detail in calls)
+
+
+def test_progress_cb_raising_aborts_the_pass(bucket_repo: Path):
+    """No cancellation concept lives in this module: a callback that
+    raises just aborts the pass via normal exception propagation - this is
+    what the GUI's Stop button relies on (see mechanic/gui/server.py's
+    JobCancelled)."""
+    staleness = churn.compute_staleness(bucket_repo, fmt="sigma", mechanical_threshold=0.10)
+
+    class _Stop(Exception):
+        pass
+
+    seen_done = []
+
+    def cb(done: int, total: int, detail: str) -> None:
+        seen_done.append(done)
+        if done == 1:
+            raise _Stop()
+
+    with pytest.raises(_Stop):
+        semantic_diff.compute_semantic_diff(bucket_repo, fmt="sigma", staleness_report=staleness, progress_cb=cb)
+    # Aborted after the 2nd touch's callback (done=1) - the 3rd (done=2)
+    # never happened, proving the pass actually stopped, not just that the
+    # exception surfaced at the end.
+    assert seen_done == [0, 1]

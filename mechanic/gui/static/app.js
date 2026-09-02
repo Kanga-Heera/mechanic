@@ -152,42 +152,81 @@ function pollJob(jobId, loadedWith) {
       clearInterval(timer);
       showProgress(false);
       showError(status.error || "Unknown error while loading this repository.");
+    } else if (status.status === "cancelled") {
+      clearInterval(timer);
+      showProgress(false);
+      showInfo("Stopped — no results for this load (nothing was salvaged mid-computation). Start a new load whenever you're ready.");
     }
   }, 600);
 }
+
+// Stages that report real per-item progress (not just a coarse marker) -
+// both get the same "N/total, currently on X" treatment.
+const GRANULAR_STAGES = new Set(["semantic_diff", "classifying"]);
 
 function renderProgress(status) {
   const labels = {
     pending: "Starting…",
     mining: status.total ? `Mining git history… (${status.done} commits)` : "Mining git history…",
     staleness: "Computing staleness…",
-    semantic_diff: "Computing behavioral diff…",
+    semantic_diff: status.total ? `Computing behavioral diff… (${status.done}/${status.total})` : "Computing behavioral diff…",
     classifying: `Classifying fragility… (${status.done}/${status.total || "?"})`,
   };
   const label = labels[status.status] || status.status;
   const fill = document.getElementById("progress-fill");
   const lbl = document.getElementById("progress-label");
+  const detailEl = document.getElementById("progress-detail");
   lbl.textContent = `${label} — ${status.elapsed_seconds}s`;
-  if (status.status === "classifying" && status.total) {
+  if (GRANULAR_STAGES.has(status.status) && status.total) {
     fill.classList.remove("indeterminate");
     fill.style.width = `${Math.max(4, Math.round((status.done / status.total) * 100))}%`;
   } else {
     fill.classList.add("indeterminate");
   }
+  if (status.detail) {
+    detailEl.textContent = `→ ${status.detail}`;
+    detailEl.hidden = false;
+  } else {
+    detailEl.hidden = true;
+  }
 }
 
 function showProgress(visible) {
   document.getElementById("progress-area").hidden = !visible;
+  document.getElementById("stop-btn").disabled = false;
   if (visible) renderProgress({ status: "pending", done: 0, total: 0, elapsed_seconds: 0 });
 }
 
+document.getElementById("stop-btn").addEventListener("click", async () => {
+  if (!state.jobId) return;
+  const btn = document.getElementById("stop-btn");
+  btn.disabled = true;
+  btn.textContent = "Stopping…";
+  try {
+    await api(`/api/jobs/${state.jobId}/cancel`, { method: "POST" });
+  } catch (e) {
+    /* the polling loop will surface whatever state the job actually ends up in */
+  } finally {
+    btn.textContent = "Stop";
+  }
+});
+
 function showError(message) {
   const b = document.getElementById("error-banner");
+  b.classList.remove("info");
+  b.textContent = message;
+  b.hidden = false;
+}
+function showInfo(message) {
+  const b = document.getElementById("error-banner");
+  b.classList.add("info");
   b.textContent = message;
   b.hidden = false;
 }
 function hideError() {
-  document.getElementById("error-banner").hidden = true;
+  const b = document.getElementById("error-banner");
+  b.classList.remove("info");
+  b.hidden = true;
 }
 
 async function loadResult(jobId, loadedWith) {

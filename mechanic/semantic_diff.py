@@ -76,7 +76,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import git
 import yaml
@@ -427,6 +427,7 @@ def compute_semantic_diff(
     as_of: Optional[date] = None,
     staleness_report: Optional[StalenessReport] = None,
     all_facts: Optional[list] = None,
+    progress_cb: Optional[Callable[[int, int, str], None]] = None,
 ) -> SemanticDiffReport:
     """Pass 2: classify every organic touch Pass 1 (`churn.mine_organic_touches`)
     identified, then enrich `staleness_report`'s per-rule `RuleChurn` records
@@ -443,6 +444,14 @@ def compute_semantic_diff(
     `staleness_report` passthrough, a caller that mines once up front (as
     Part 3's gathering script now does) triggers exactly one full traversal
     per repo, not three.
+
+    `progress_cb`, if given, is called `(done, total, canonical_file)`
+    before each touch is diffed - this is THE dominant cost at corpus scale
+    (QUICKSTART.md's "honest timing note": ~93% of a full SigmaHQ run), so
+    it's the one place in this whole pipeline where per-item progress (and,
+    for a caller willing to raise out of the callback, responsive
+    cancellation) actually matters. `None` by default; every existing call
+    site passes nothing and behaves exactly as before.
     """
     from mechanic import churn as churn_mod
 
@@ -466,7 +475,10 @@ def compute_semantic_diff(
         for r in staleness_report.rules
     }
 
-    for t in diffable_touches:
+    total_touches = len(diffable_touches)
+    for i, t in enumerate(diffable_touches):
+        if progress_cb is not None:
+            progress_cb(i, total_touches, t.canonical_file)
         before_text = fetcher.text_at(t.parent_hash, t.old_path)
         after_text = fetcher.text_at(t.commit_hash, t.new_path)
         if before_text is None or after_text is None:
