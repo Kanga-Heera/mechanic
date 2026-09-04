@@ -17,6 +17,18 @@ console = Console()
 err_console = Console(stderr=True)
 
 _FMT_CHOICE = click.Choice(sorted(FORMATS))
+# scan/ast (Component 1, loading) and triage/explain (fragility/tiering/
+# priority) are all Sigma-only - see docs/core-vs-experiment.md, "The
+# staleness-vs-fragility scoping decision". `scan --fmt elastic_toml` used
+# to be technically accepted but never meaningful (loader.py is pySigma's
+# own YAML/Sigma parser regardless of `fmt` - it would just YAML-parse TOML
+# text and report the result as "load failures", which is not a real
+# statement about Elastic rule validity). Restricting the CHOICE itself
+# means click refuses it at argument-parsing time, with click's own clear
+# usage error, before any of that misleading work happens. `staleness`/
+# `report`'s staleness half stay on the full `_FMT_CHOICE` - format-agnostic
+# by deliberate design, since git history is real regardless of rule format.
+_SIGMA_ONLY_FMT_CHOICE = click.Choice(["sigma"])
 
 
 def _mining_timeout_option():
@@ -281,12 +293,19 @@ def _render_triage_report(report: priority.TriageReport, top_n: int, ordering: s
         "for the full matrix.",
         style="dim",
     )
+    # `caveat` is never set on this path in the core anymore - `triage`'s
+    # `--fmt` is restricted to Sigma-only (see docs/core-vs-experiment.md),
+    # and `_sigma_fragility` never sets one. Kept, not deleted: this is
+    # generic caveat-rendering logic, not Elastic/Splunk-specific code, and
+    # stays correct/harmless if a caveated report is ever rendered here
+    # again (e.g. a future core capability, or by direct API use rather
+    # than the CLI).
     if any(r.fragility.caveat for r in rows):
         console.print(
-            "[yellow]* tier confidence (and any priority marked with a trailing *) comes from the "
-            "TEXT-ONLY path (Elastic/Splunk, no AST) — computed WITHOUT the AND/OR combination "
-            "correction that external validation against MITRE STP showed necessary. Treat these as "
-            "less trustworthy than an unmarked (Sigma/AST) tier; see `mechanic explain <file>` for "
+            "[yellow]* tier confidence (and any priority marked with a trailing *) comes from a "
+            "TEXT-ONLY path (no AST) — computed WITHOUT the AND/OR combination correction that "
+            "external validation against MITRE STP showed necessary. Treat these as less "
+            "trustworthy than an unmarked (Sigma/AST) tier; see `mechanic explain <file>` for "
             "the full caveat on any individual row.[/yellow]"
         )
 
@@ -399,14 +418,22 @@ def _render_explain(sig: priority.RuleSignals) -> None:
 )
 @click.version_option(prog_name="mechanic", package_name="mechanic")
 def main() -> None:
-    """[bold]mechanic[/bold] - detection-rule maintenance triage.
+    """[bold]mechanic[/bold] - Sigma detection-rule maintenance triage.
 
-    Fault-isolated Sigma/Elastic/Splunk rule loading, git-driven behavioral
-    staleness, a structural fragility classifier validated against MITRE's
-    Summiting the Pyramid methodology, and an explainable review-priority
-    triage on top - built to surface which detection rules need a human
-    look, not to hand down verdicts. Every command below has its own
-    [cyan]--help[/cyan] with worked examples - see [cyan]mechanic COMMAND --help[/cyan].
+    Fault-isolated Sigma rule loading, git-driven behavioral staleness
+    (format-agnostic - also runs on Elastic/Splunk repos, see [cyan]mechanic
+    staleness --help[/cyan]), a structural fragility classifier validated
+    against MITRE's Summiting the Pyramid methodology on Sigma's real AST,
+    and an explainable review-priority triage on top - built to surface
+    which detection rules need a human look, not to hand down verdicts.
+    Every command below has its own [cyan]--help[/cyan] with worked examples -
+    see [cyan]mechanic COMMAND --help[/cyan].
+
+    Fragility/tiering/priority ([cyan]scan[/cyan]/[cyan]triage[/cyan]/
+    [cyan]explain[/cyan]/[cyan]report[/cyan]) are Sigma-only, deliberately -
+    see [u]docs/core-vs-experiment.md[/u] for why and
+    [u]docs/multiformat-experimental.md[/u] for the quarantined Elastic/Splunk
+    text-path work.
 
     This is the CORE product: it never imports the Stage 3 repair pipeline
     (no RSigma, no network, no LLM API key required for any command here).
@@ -421,8 +448,8 @@ def main() -> None:
     "--fmt",
     default="sigma",
     show_default=True,
-    type=_FMT_CHOICE,
-    help="Rule format to parse (see mechanic/discovery.py for the full registry).",
+    type=_SIGMA_ONLY_FMT_CHOICE,
+    help="Rule format to parse. Sigma-only - loader.py is pySigma's own parser (see docs/core-vs-experiment.md).",
 )
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON instead of tables.")
 def scan(path: Path, fmt: str, as_json: bool) -> None:
@@ -435,10 +462,14 @@ def scan(path: Path, fmt: str, as_json: bool) -> None:
     triage, since both of those silently skip whatever scan would have
     flagged as a load failure.
 
+    Sigma-only, like [cyan]triage[/cyan]/[cyan]explain[/cyan] - loading uses
+    pySigma's own parser, which has no Elastic/Splunk equivalent (see
+    [u]docs/core-vs-experiment.md[/u]). [cyan]staleness[/cyan]/[cyan]report[/cyan]'s
+    staleness half stays format-agnostic - see that command's own [cyan]--help[/cyan].
+
     \b
     Examples:
       mechanic scan ./sigma/rules
-      mechanic scan --fmt elastic_toml ./elastic-detection-rules/rules
       mechanic scan --json ./sigma/rules > scan.json
     """
     result, validate_failures = _scan(path, fmt)
@@ -484,6 +515,13 @@ def staleness(
     commit counts and make every rule look "actively maintained." Reports
     per-rule organic commit counts, days since last touch, and a threshold-
     sensitivity table so the mechanical cutoff isn't taken on faith.
+
+    The one core command that accepts Elastic/Splunk formats -
+    [cyan]staleness[/cyan] is format-agnostic BY DESIGN: git history is real
+    regardless of what language the rule is written in. This is deliberately
+    different from [cyan]triage[/cyan]/[cyan]explain[/cyan] (Sigma-only) -
+    see [u]docs/core-vs-experiment.md[/u], "The staleness-vs-fragility
+    scoping decision".
 
     \b
     Examples:
@@ -534,7 +572,13 @@ def ast(file: Path, as_json: bool) -> None:
 
 @main.command()
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.option("--fmt", default="sigma", show_default=True, type=_FMT_CHOICE, help="Rule format to discover.")
+@click.option(
+    "--fmt",
+    default="sigma",
+    show_default=True,
+    type=_SIGMA_ONLY_FMT_CHOICE,
+    help="Rule format to discover. Sigma-only, since this includes `scan` (see that command's --help).",
+)
 @click.option(
     "--mechanical-threshold",
     default=churn.DEFAULT_THRESHOLD,
@@ -560,7 +604,9 @@ def report(
     Convenience wrapper - identical output to running both commands
     separately, useful when you want the full load-health + staleness
     picture for a repository in one shot (e.g. piping to a single JSON
-    file for a CI artifact).
+    file for a CI artifact). Sigma-only because it includes `scan` - run
+    [cyan]mechanic staleness --fmt elastic_toml/splunk_yaml[/cyan] directly
+    for the format-agnostic staleness half alone on those repos.
 
     \b
     Examples:
@@ -593,7 +639,13 @@ def report(
 
 @main.command()
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.option("--fmt", default="sigma", show_default=True, type=_FMT_CHOICE, help="Rule format to discover.")
+@click.option(
+    "--fmt",
+    default="sigma",
+    show_default=True,
+    type=_SIGMA_ONLY_FMT_CHOICE,
+    help="Rule format to discover. Sigma-only - see docs/core-vs-experiment.md for why.",
+)
 @click.option(
     "--mechanical-threshold",
     default=churn.DEFAULT_THRESHOLD,
@@ -632,6 +684,12 @@ def triage(
 ) -> None:
     """Staleness and fragility, side by side, sorted for review.
 
+    [bold]Sigma-only[/bold] - fragility/tiering/priority are validated against
+    MITRE's STP methodology on Sigma's real AST and nowhere else (see
+    [u]docs/core-vs-experiment.md[/u] and [u]docs/multiformat-experimental.md[/u]
+    for the Elastic/Splunk text-path work and why it's quarantined instead
+    of shipped here).
+
     [bold yellow]NOT a combined score[/bold yellow] - a pre-registered correlation
     experiment found no association between the two axes reliable enough to
     fuse into one number (see RESULTS.md, "Part 3"). Every rule keeps both
@@ -652,6 +710,9 @@ def triage(
         report = priority.compute_triage(
             path, fmt, mechanical_threshold, subdir=subdir, refresh=refresh, mining_timeout=(mining_timeout or None)
         )
+    except priority.UnsupportedFormatError as e:
+        err_console.print(f"[red]{e}[/red]")
+        raise SystemExit(1)
     except churn.ChurnError as e:
         err_console.print(f"[red]{e}[/red]")
         raise SystemExit(1)
@@ -663,7 +724,13 @@ def triage(
 
 @main.command()
 @click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--fmt", default="sigma", show_default=True, type=_FMT_CHOICE, help="Rule format FILE belongs to.")
+@click.option(
+    "--fmt",
+    default="sigma",
+    show_default=True,
+    type=_SIGMA_ONLY_FMT_CHOICE,
+    help="Rule format FILE belongs to. Sigma-only - see docs/core-vs-experiment.md for why.",
+)
 @click.option(
     "--mechanical-threshold",
     default=churn.DEFAULT_THRESHOLD,
@@ -690,18 +757,17 @@ def explain(
 ) -> None:
     """Plain-English justification for why one rule sits where it does.
 
-    Auto-detects the git root above FILE and re-runs the same computation
-    `mechanic triage` uses, so the two commands are always consistent, then
-    prints a short prose explanation first (staleness, tier, what drove it,
-    any triage hypothesis - and, for Elastic/Splunk, an explicit caveat that
-    the tier wasn't computed with the AND/OR correction Sigma's AST path
-    gets), followed by the full field-level detail for anyone who wants to
-    verify it. "Review this," never a verdict.
+    [bold]Sigma-only[/bold], like [cyan]triage[/cyan] - see
+    [u]docs/core-vs-experiment.md[/u]. Auto-detects the git root above FILE
+    and re-runs the same computation `mechanic triage` uses, so the two
+    commands are always consistent, then prints a short prose explanation
+    first (staleness, tier, what drove it, any triage hypothesis), followed
+    by the full field-level detail for anyone who wants to verify it.
+    "Review this," never a verdict.
 
     \b
     Examples:
       mechanic explain ./sigma/rules/windows/some_rule.yml
-      mechanic explain --fmt splunk_yaml ./splunk-security-content/detections/some_rule.yml
       mechanic explain --json ./sigma/rules/windows/some_rule.yml | jq .fragility
     """
     file = file.resolve()
@@ -715,6 +781,9 @@ def explain(
         report = priority.compute_triage(
             root, fmt, mechanical_threshold, subdir=subdir, refresh=refresh, mining_timeout=(mining_timeout or None)
         )
+    except priority.UnsupportedFormatError as e:
+        err_console.print(f"[red]{e}[/red]")
+        raise SystemExit(1)
     except churn.ChurnError as e:
         err_console.print(f"[red]{e}[/red]")
         raise SystemExit(1)

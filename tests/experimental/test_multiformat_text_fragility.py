@@ -1,4 +1,9 @@
-from mechanic import text_fragility as tf
+"""Elastic/Splunk text-path atom extraction + classification - quarantined,
+not part of the CORE (see docs/multiformat-experimental.md and
+docs/core-vs-experiment.md). Kept and run in isolation so the experimental
+code doesn't bit-rot, never exercised by mechanic.cli."""
+
+from mechanic.experimental.multiformat import text_fragility as tf
 
 
 def _atoms(*triples):

@@ -37,27 +37,40 @@ bad").
 
 from __future__ import annotations
 
-import tomllib
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-import yaml
-
-from mechanic import ast_repr, churn, fragility, loader, semantic_diff, splunk_macros, text_fragility
+from mechanic import ast_repr, churn, fragility, loader, semantic_diff
 from mechanic.discovery import discover_files
 
 TIER_RANK = fragility.TIER_RANK  # IOC=0, Artifact=1, Tool=2, TTP=3
 FRAGILE_TIERS = {"IOC", "Artifact", "Tool"}  # matches Task 7's own 2x2 collapse (non-fragile = TTP alone)
 
-_AND_OR_CAVEAT = (
-    "This tier comes from the text-only path (no AST): it is capped at 'medium' "
-    "confidence and computed WITHOUT the AND/OR combination correction (AND->MIN, "
-    "OR->MAX) that external validation against STP showed to be necessary -- the "
-    "correction requires walking a real parse tree, which does not exist for this "
-    "rule language here. Treat this tier as less trustworthy than a Sigma/AST tier."
+# Fragility/tiering/priority are SIGMA-ONLY in the core - see
+# docs/core-vs-experiment.md and docs/multiformat-experimental.md for the
+# scoping decision and why. Staleness (churn.py/semantic_diff.py) stays
+# format-agnostic; only this module's fragility/priority layer is scoped.
+SIGMA_ONLY_FRAGILITY_MESSAGE = (
+    "Mechanic core analyses Sigma rules; Elastic/Splunk structural analysis is "
+    "experimental and not part of the validated core - see docs/multiformat-experimental.md."
 )
+
+
+class UnsupportedFormatError(ValueError):
+    """Raised by `compute_triage` for any `fmt` other than "sigma" - fragility,
+    tiering, and priority are Sigma-only in the core (see
+    SIGMA_ONLY_FRAGILITY_MESSAGE above). This is NOT a churn.ChurnError: it
+    is refused before any git mining or staleness computation happens at
+    all, not a failure encountered while computing something - a caller
+    that wants Elastic/Splunk fragility/triage should call
+    `mechanic.experimental.multiformat.triage.compute_multiformat_triage`
+    directly instead, with its lower external-validation bar disclosed."""
+
+    def __init__(self, fmt: str):
+        self.fmt = fmt
+        super().__init__(f"{SIGMA_ONLY_FRAGILITY_MESSAGE} (requested fmt={fmt!r})")
 
 
 @dataclass
@@ -124,66 +137,14 @@ def _sigma_fragility(path: Path) -> FragilitySignal:
     )
 
 
-def _elastic_fragility(path: Path) -> FragilitySignal:
-    try:
-        with open(path, "rb") as f:
-            doc = tomllib.load(f)
-    except Exception as e:
-        return FragilitySignal(None, "low", False, True, f"failed to parse TOML: {e}", [], {}, [], None)
-    rule = doc.get("rule", {})
-    rtype = rule.get("type", "")
-    if rtype == "threat_match":
-        return FragilitySignal(
-            "IOC", "medium", False, False, None, [], {}, [],
-            "Tier assigned from rule type ('threat_match' = indicator matching), not from content "
-            "classification -- no atoms were extracted or scored. " + _AND_OR_CAVEAT,
-        )
-    query = rule.get("query")
-    if not query:
-        return FragilitySignal(None, "low", False, True, "no 'query' field present in rule", [], {}, [], None)
-    try:
-        atoms, ok = text_fragility.extract_elastic_atoms(query)
-        if not ok:
-            return FragilitySignal(None, "low", False, True, "regex-based atom extraction found nothing in query text", [], {}, [], None)
-        result = text_fragility.classify_text_rule(atoms, ok)
-    except Exception as e:
-        return FragilitySignal(None, "low", False, True, f"text classification failed: {e}", [], {}, [], None)
-    atom_dicts = [{"field": a.field, "value": a.value, "negated": a.negated} for a in atoms]
-    if result.unscoreable or result.tier is None:
-        return FragilitySignal(None, "low", False, True, "text classifier returned no tier", result.structural_findings, {}, atom_dicts, None)
-    return FragilitySignal(
-        result.tier, result.confidence, False, False, None,
-        result.structural_findings, {}, atom_dicts, _AND_OR_CAVEAT,
-    )
-
-
-def _splunk_fragility(path: Path) -> FragilitySignal:
-    try:
-        with open(path, encoding="utf-8") as f:
-            doc = yaml.safe_load(f)
-    except Exception as e:
-        return FragilitySignal(None, "low", False, True, f"failed to parse YAML: {e}", [], {}, [], None)
-    search = doc.get("search", "") if isinstance(doc, dict) else ""
-    if not search:
-        return FragilitySignal(None, "low", False, True, "no 'search' field present in rule", [], {}, [], None)
-    try:
-        resolved, *_ = splunk_macros.resolve_macros(search)
-        atoms, ok = text_fragility.extract_splunk_atoms(resolved)
-        if not ok:
-            return FragilitySignal(None, "low", False, True, "regex-based atom extraction found nothing in resolved search text", [], {}, [], None)
-        result = text_fragility.classify_text_rule(atoms, ok, raw_text=resolved, pre_resolution_text=search)
-    except Exception as e:
-        return FragilitySignal(None, "low", False, True, f"text classification failed: {e}", [], {}, [], None)
-    atom_dicts = [{"field": a.field, "value": a.value, "negated": a.negated} for a in atoms]
-    if result.unscoreable or result.tier is None:
-        return FragilitySignal(None, "low", False, True, "text classifier returned no tier", result.structural_findings, {}, atom_dicts, None)
-    return FragilitySignal(
-        result.tier, result.confidence, False, False, None,
-        result.structural_findings, {}, atom_dicts, _AND_OR_CAVEAT,
-    )
-
-
-_FRAGILITY_FN = {"sigma": _sigma_fragility, "elastic_toml": _elastic_fragility, "splunk_yaml": _splunk_fragility}
+# Elastic/Splunk's own fragility builders (classify_elastic_file/
+# classify_splunk_file) used to live here as `_elastic_fragility`/
+# `_splunk_fragility` - moved, unchanged, to
+# mechanic/experimental/multiformat/multiformat_fragility.py as part of
+# scoping the core to Sigma-only (see docs/multiformat-experimental.md).
+# `build_triage_report` below is the reusable engine that module composes
+# with its own fragility functions; `compute_triage` is the Sigma-only
+# entry point every core caller (CLI, GUI) actually uses.
 
 
 @dataclass
@@ -713,8 +674,9 @@ def _hypotheses(behavioral_commit_count: Optional[int], never_revised: bool, tie
     return hyps
 
 
-def compute_triage(
+def build_triage_report(
     path: Path,
+    fragility_fn: Callable[[Path], FragilitySignal],
     fmt: str = "sigma",
     mechanical_threshold: float = churn.DEFAULT_THRESHOLD,
     subdir: Optional[str] = None,
@@ -724,10 +686,23 @@ def compute_triage(
     progress_cb: Optional[Callable[[str, int, int], None]] = None,
     mining_timeout: Optional[float] = None,
 ) -> TriageReport:
-    """Single entry point: mines git history once (from a disk cache when
+    """The reusable triage ENGINE: mines git history once (from a disk cache when
     available - see `churn.mine_commits_cached`), runs staleness + semantic
     diff (Part 1) and fragility classification (Part 2) per rule, and
     assembles the side-by-side (not combined) triage view.
+
+    `fragility_fn` is the per-file classifier this engine calls for every
+    discovered rule - the one axis this function does NOT hard-code, so it
+    can be reused for more than Sigma. `compute_triage` below is the
+    CORE's own, Sigma-only public entry point (every CLI/GUI call site uses
+    that, never this function directly) - it always passes `_sigma_fragility`
+    and refuses any other `fmt` before ever reaching here. The Elastic/Splunk
+    quarantined experiment
+    (`mechanic.experimental.multiformat.triage.compute_multiformat_triage`)
+    is the only other caller, passing its own `classify_elastic_file`/
+    `classify_splunk_file` instead - see docs/multiformat-experimental.md.
+    This function has no opinion about which `fmt`/`fragility_fn` pairing is
+    "supported"; that scoping decision lives entirely in `compute_triage`.
 
     `all_facts`, if given (e.g. because a caller is comparing several
     `mechanical_threshold` values against the same repo IN ONE PROCESS),
@@ -809,7 +784,6 @@ def compute_triage(
             if canonical not in earliest or f.author_date < earliest[canonical]:
                 earliest[canonical] = f.author_date
 
-    fragility_fn = _FRAGILITY_FN[fmt]
     scoreable: list[RuleSignals] = []
     unscoreable: list[RuleSignals] = []
     total_rules = len(enriched.rules)
@@ -846,4 +820,53 @@ def compute_triage(
         disclosure=_DISCLOSURE,
         history_health=staleness_report.history_health,
         history_health_reasons=staleness_report.history_health_reasons,
+    )
+
+
+def compute_triage(
+    path: Path,
+    fmt: str = "sigma",
+    mechanical_threshold: float = churn.DEFAULT_THRESHOLD,
+    subdir: Optional[str] = None,
+    as_of: Optional[date] = None,
+    all_facts: Optional[list] = None,
+    refresh: bool = False,
+    progress_cb: Optional[Callable[[str, int, int], None]] = None,
+    mining_timeout: Optional[float] = None,
+) -> TriageReport:
+    """The CORE's public triage entry point - every CLI (`mechanic triage`/
+    `mechanic explain`) and GUI call site uses this, never `build_triage_report`
+    directly. SIGMA-ONLY: fragility, tiering, and priority are validated
+    against MITRE's STP methodology on Sigma's real AST (see RESULTS.md and
+    docs/multiformat-experimental.md) and nowhere else, so any `fmt` other
+    than `"sigma"` is refused immediately, before any git-history mining
+    happens, with `UnsupportedFormatError` - never a silently-produced
+    low-confidence tier dressed as a real one.
+
+    Staleness (`mechanic staleness`, `churn.compute_staleness`) is
+    deliberately NOT scoped this way - git history is real regardless of
+    rule format, so that command stays format-agnostic. This function only
+    scopes the fragility/tiering/priority layer triage adds on top - see
+    docs/core-vs-experiment.md, "The staleness-vs-fragility scoping
+    decision".
+
+    Every parameter below is forwarded unchanged to `build_triage_report`
+    (paired with the core's own `_sigma_fragility`) - see that function's
+    docstring for what each one does; nothing about the Sigma computation
+    itself changed by this split (it is the exact same code that used to run
+    directly in this function's body).
+    """
+    if fmt != "sigma":
+        raise UnsupportedFormatError(fmt)
+    return build_triage_report(
+        path,
+        _sigma_fragility,
+        fmt=fmt,
+        mechanical_threshold=mechanical_threshold,
+        subdir=subdir,
+        as_of=as_of,
+        all_facts=all_facts,
+        refresh=refresh,
+        progress_cb=progress_cb,
+        mining_timeout=mining_timeout,
     )

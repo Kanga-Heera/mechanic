@@ -300,54 +300,49 @@ def test_triage_unscoreable_never_gets_a_tier(cli_repo: Path):
         assert entry["fragility"]["unscoreable_reason"]
 
 
-def test_triage_text_path_caveat_visible_in_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """An Elastic/Splunk (text-path) rule's tier must carry a non-null
-    caveat distinguishing it from an AST-derived tier - the machine-
-    readable form of the "never present a text-path tier as equal
-    confidence" requirement."""
-    monkeypatch.setattr(churn, "STALE_DAYS", 30, raising=False)
+# `test_triage_text_path_caveat_visible_in_json`/`_in_human_output` used to
+# live here, invoking `mechanic triage --fmt elastic_toml` directly.
+# Fragility/tiering/priority are now Sigma-only in the core (see
+# docs/core-vs-experiment.md) - `triage`/`explain` no longer accept that
+# `--fmt` value at all (see the refusal tests below), so the caveat-
+# visibility assertion moved, unchanged in substance, to
+# tests/experimental/test_multiformat_triage.py::
+# test_text_path_tier_always_carries_a_caveat, calling the quarantined
+# `compute_multiformat_triage` directly instead of going through this CLI.
+
+
+@pytest.mark.parametrize("command", ["triage", "explain"])
+@pytest.mark.parametrize("fmt", ["elastic_toml", "splunk_yaml"])
+def test_triage_and_explain_refuse_non_sigma_fmt_at_the_cli_level(command: str, fmt: str, cli_repo: Path):
+    """Fragility/tiering/priority are Sigma-only in the core - `--fmt` on
+    `triage`/`explain` must refuse elastic_toml/splunk_yaml at click's own
+    argument-parsing stage (a clean, immediate usage error), never reach
+    compute_triage and never silently produce a low-confidence tier dressed
+    as a real one. `scan`/`staleness`/`report` are unaffected (see their own
+    tests) - only the two Sigma-only commands are restricted."""
+    target = str(cli_repo) if command == "triage" else str(cli_repo / "rules" / "fragile.yml")
+    result = runner.invoke(main, [command, target, "--fmt", fmt])
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "invalid choice" in result.output.lower() or "Error" in result.output
+
+
+def test_staleness_still_accepts_non_sigma_fmt(tmp_path: Path):
+    """Staleness stays format-agnostic by deliberate design (git history is
+    real regardless of rule format) - only fragility/tiering/priority are
+    Sigma-only. This is a smoke test that `--fmt elastic_toml` is still a
+    valid CHOICE for `staleness` (click doesn't reject it at parse time),
+    not a claim about the resulting numbers' meaning."""
     repo = tmp_path / "repo"
     (repo / "rules").mkdir(parents=True)
     _git(repo.parent, "init", "-q", str(repo))
     _git(repo, "config", "user.email", "a@example.com")
     _git(repo, "config", "user.name", "Author A")
-    _write(
-        repo,
-        "rules/detect.toml",
-        '[rule]\nname = "Test"\ntype = "query"\nquery = \'process.name : "mimikatz.exe"\'\n',
-    )
+    _write(repo, "rules/good.toml", '[rule]\nname = "Good"\ntype = "query"\nquery = \'process.name : "mimikatz.exe"\'\n')
     _commit(repo, "add elastic rule", "2020-01-01T00:00:00")
-
-    result = runner.invoke(main, ["triage", str(repo), "--subdir", "rules", "--fmt", "elastic_toml", "--json"])
+    result = runner.invoke(main, ["staleness", str(repo), "--fmt", "elastic_toml", "--json"])
     assert result.exit_code == 0, result.output
-    data = json.loads(result.stdout)
-    all_rules = data["rules"] + data["unscoreable"]
-    scored = [r for r in all_rules if r["fragility"]["tier"] is not None]
-    if scored:  # text-classifier extraction is regex-based; skip assertion body if it found nothing to tier
-        assert all(r["fragility"]["caveat"] for r in scored), "every text-path tier must carry a non-null caveat"
-
-
-def test_triage_text_path_caveat_visible_in_human_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setattr(churn, "STALE_DAYS", 30, raising=False)
-    repo = tmp_path / "repo"
-    (repo / "rules").mkdir(parents=True)
-    _git(repo.parent, "init", "-q", str(repo))
-    _git(repo, "config", "user.email", "a@example.com")
-    _git(repo, "config", "user.name", "Author A")
-    _write(
-        repo,
-        "rules/detect.toml",
-        '[rule]\nname = "Test"\ntype = "query"\nquery = \'process.name : "mimikatz.exe"\'\n',
-    )
-    _commit(repo, "add elastic rule", "2020-01-01T00:00:00")
-
-    result = runner.invoke(main, ["triage", str(repo), "--subdir", "rules", "--fmt", "elastic_toml"])
-    assert result.exit_code == 0, result.output
-    # Either the legend fired (a text-path row got a tier) or nothing was
-    # scoreable at all - both are fine; what must never happen is a "*"
-    # appearing in the table with no legend explaining it.
-    if "*" in result.output:
-        assert "TEXT-ONLY path" in result.output
+    assert "invalid choice" not in result.output.lower()
 
 
 # --- explain ----------------------------------------------------------------

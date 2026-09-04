@@ -215,7 +215,12 @@ def test_narrative_surfaces_and_or_caveat_for_text_path_tiers():
         structural_findings=[],
         structural_detail={},
         atoms=[{"field": "process.name", "value": "mimikatz.exe", "negated": False}],
-        caveat=priority._AND_OR_CAVEAT,
+        # Any truthy caveat should trigger this rendering - the exact text
+        # used to be `priority._AND_OR_CAVEAT` (now in the quarantined
+        # mechanic.experimental.multiformat.multiformat_fragility, see
+        # docs/core-vs-experiment.md); a plain literal here tests the same
+        # narrative-rendering logic without a core->experiment dependency.
+        caveat="text-only path caveat: computed without the AND/OR combination correction validated against STP.",
     )
     sig = priority.RuleSignals(
         file="rules/text_path_example.yml",
@@ -271,44 +276,26 @@ def test_deprecated_pipe_syntax_is_unscoreable_not_a_crash(tmp_path: Path):
     assert "AST build/classify failed" in match.fragility.unscoreable_reason
 
 
-def test_malformed_elastic_rule_does_not_crash_the_batch(tmp_path: Path, monkeypatch):
-    """`_sigma_fragility` already had dedicated crash-isolation regression
-    tests (above); `_elastic_fragility`/`_splunk_fragility` had the same
-    try/except structure but no end-to-end `compute_triage` test proving a
-    malformed file of THOSE formats, mixed with a good one, doesn't kill the
-    whole batch - this closes that gap."""
-    monkeypatch.setattr(churn, "STALE_DAYS", 30, raising=False)
-    repo = tmp_path / "repo_elastic"
+# `test_malformed_elastic_rule_does_not_crash_the_batch` and
+# `test_malformed_splunk_rule_does_not_crash_the_batch` used to live here,
+# calling `priority.compute_triage(repo, "elastic_toml"/"splunk_yaml", ...)`.
+# Fragility/tiering/priority are now Sigma-only in the core (see
+# docs/core-vs-experiment.md) - `compute_triage` refuses those formats
+# outright (see `test_compute_triage_refuses_non_sigma_format` below), so
+# those two tests moved, unchanged in substance, to
+# tests/experimental/test_multiformat_triage.py, calling the quarantined
+# `compute_multiformat_triage` instead.
+
+
+def test_compute_triage_refuses_non_sigma_format(tmp_path: Path):
+    """Fragility/tiering/priority are Sigma-only in the core - `compute_triage`
+    must refuse immediately (before any git mining) for any other `fmt`,
+    never silently produce a low-confidence tier dressed as a real one."""
+    repo = tmp_path / "repo"
     (repo / "rules").mkdir(parents=True)
     _git(repo.parent, "init", "-q", str(repo))
-    _git(repo, "config", "user.email", "a@example.com")
-    _git(repo, "config", "user.name", "Author A")
-    _write(repo, "rules/good.toml", '[rule]\nname = "Good"\ntype = "query"\nquery = \'process.name : "mimikatz.exe"\'\n')
-    _write(repo, "rules/broken.toml", "this is not valid toml at all {{{ [[[ ===\n")
-    _commit(repo, "add elastic rules", "2020-01-01T00:00:00")
-
-    report = priority.compute_triage(repo, "elastic_toml", mechanical_threshold=0.9, as_of=AS_OF)
-    all_files = {r.file for r in report.scoreable} | {r.file for r in report.unscoreable}
-    assert {"rules/good.toml", "rules/broken.toml"} == all_files
-    broken = next(r for r in report.unscoreable if r.file == "rules/broken.toml")
-    assert broken.fragility.tier is None
-    assert "failed to parse TOML" in broken.fragility.unscoreable_reason
-
-
-def test_malformed_splunk_rule_does_not_crash_the_batch(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(churn, "STALE_DAYS", 30, raising=False)
-    repo = tmp_path / "repo_splunk"
-    (repo / "rules").mkdir(parents=True)
-    _git(repo.parent, "init", "-q", str(repo))
-    _git(repo, "config", "user.email", "a@example.com")
-    _git(repo, "config", "user.name", "Author A")
-    _write(repo, "rules/good.yml", "search: 'index=main process_name=mimikatz.exe'\n")
-    _write(repo, "rules/broken.yml", "search: [this is not: valid: yaml: at: all\n")
-    _commit(repo, "add splunk rules", "2020-01-01T00:00:00")
-
-    report = priority.compute_triage(repo, "splunk_yaml", mechanical_threshold=0.9, as_of=AS_OF)
-    all_files = {r.file for r in report.scoreable} | {r.file for r in report.unscoreable}
-    assert {"rules/good.yml", "rules/broken.yml"} == all_files
-    broken = next(r for r in report.unscoreable if r.file == "rules/broken.yml")
-    assert broken.fragility.tier is None
-    assert "failed to parse YAML" in broken.fragility.unscoreable_reason
+    for fmt in ("elastic_toml", "splunk_yaml"):
+        with pytest.raises(priority.UnsupportedFormatError) as exc_info:
+            priority.compute_triage(repo, fmt, mechanical_threshold=0.9, as_of=AS_OF)
+        assert "Sigma" in str(exc_info.value)
+        assert fmt in str(exc_info.value)

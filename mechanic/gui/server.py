@@ -171,6 +171,16 @@ def _run_job(job: Job) -> None:
             job.status = "cancelled"
             job.finished_at = time.time()
         _persist(job)
+    except priority.UnsupportedFormatError as e:
+        # Belt-and-suspenders: /api/load already rejects a non-sigma `fmt`
+        # before a job is created at all (see that endpoint) - this only
+        # matters if _run_job is ever reached some other way (e.g. a
+        # restored job from an old, pre-scoping persisted database row).
+        with _JOBS_LOCK:
+            job.error = str(e)
+            job.status = "error"
+            job.finished_at = time.time()
+        _persist(job)
     except churn.ChurnError as e:
         # The core's own LOUD failure (no .git, shallow clone, etc.) -
         # surfaced verbatim, not swallowed or turned into an empty result.
@@ -313,6 +323,14 @@ def create_app(db_path: Optional[Path] = None) -> FastAPI:
         root = Path(req.path)
         if not root.exists() or not root.is_dir():
             raise HTTPException(400, f"Not a directory: {req.path}")
+        if req.fmt != "sigma":
+            # Fragility/tiering/priority are Sigma-only in the core (see
+            # docs/core-vs-experiment.md) - refused here, before a
+            # background job is even created, rather than discovered later
+            # as a job "error" after mining has already run. The static
+            # frontend no longer offers any other option in its Format
+            # select, so this only matters for a direct API call.
+            raise HTTPException(400, priority.SIGMA_ONLY_FRAGILITY_MESSAGE)
         job = Job(
             id=uuid.uuid4().hex[:12],
             path=str(root),

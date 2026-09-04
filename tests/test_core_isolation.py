@@ -29,6 +29,12 @@ EXPERIMENT_MODULES = [
     "mechanic.repair_generator",
     "mechanic.repair_outcome",
     "mechanic.cli_repair",
+    # Elastic/Splunk multiformat fragility - quarantined per
+    # docs/multiformat-experimental.md, same as the repair pipeline above.
+    "mechanic.experimental.multiformat.text_fragility",
+    "mechanic.experimental.multiformat.splunk_macros",
+    "mechanic.experimental.multiformat.multiformat_fragility",
+    "mechanic.experimental.multiformat.triage",
 ]
 
 CORE_MODULES = [
@@ -39,11 +45,9 @@ CORE_MODULES = [
     "mechanic.semantic_diff",
     "mechanic.ast_repr",
     "mechanic.fragility",
-    "mechanic.text_fragility",
     "mechanic.structural_detectors",
     "mechanic.protected_literals",
     "mechanic.refdata",
-    "mechanic.splunk_macros",
     "mechanic.priority",
     "mechanic.legacy_v1",
     "mechanic.cli",
