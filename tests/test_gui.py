@@ -53,10 +53,10 @@ def test_gui_source_imports_nothing_from_experiment():
                 assert leaf not in ln, f"{path.name} imports experiment module via: {ln!r}"
 
 
-def test_gui_has_no_repair_endpoints():
+def test_gui_has_no_repair_endpoints(tmp_path: Path):
     """The API surface itself must never expose repair/verify/gate - not
     just "no import," but no route path suggesting it either."""
-    app = create_app()
+    app = create_app(db_path=tmp_path / "gui_jobs.sqlite3")
     paths = [route.path for route in app.routes]
     for p in paths:
         for leaf in ["verify", "gate", "evasion", "repair", "llm"]:
@@ -124,8 +124,10 @@ def small_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(create_app())
+def client(tmp_path: Path) -> TestClient:
+    # Always an explicit tmp_path db - never job_store.DEFAULT_DB_PATH, so
+    # tests never read or write the real user's ~/.mechanic/gui_jobs.sqlite3.
+    return TestClient(create_app(db_path=tmp_path / "gui_jobs.sqlite3"))
 
 
 def _load_and_wait(client: TestClient, repo: Path, subdir: str = "rules", timeout: float = 30.0) -> str:
@@ -278,6 +280,24 @@ def test_no_git_history_surfaces_loud_core_error(client: TestClient, tmp_path: P
     assert result_resp.json()["detail"] == status["error"]
 
 
+def test_mining_timeout_surfaces_as_clean_job_error(client: TestClient, small_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    """`MiningTimeoutError` is a `churn.ChurnError` subclass - `_run_job`'s
+    existing ChurnError handler must catch it exactly like NoGitHistoryError,
+    surfacing a clean job error rather than an uncaught exception or a
+    silently-hung job."""
+    from mechanic import churn
+    from mechanic.gui import server as gui_server
+
+    def _timeout(*args, **kwargs):
+        raise churn.MiningTimeoutError(small_repo, churn.DEFAULT_MINING_TIMEOUT_SECONDS)
+
+    monkeypatch.setattr(gui_server.churn, "mine_commits_cached", _timeout)
+    job_id = _load_and_wait(client, small_repo)
+    status = client.get(f"/api/jobs/{job_id}").json()
+    assert status["status"] == "error"
+    assert "timeout" in status["error"].lower() or "exceeded" in status["error"].lower()
+
+
 def test_zero_rules_directory_does_not_crash(client: TestClient, tmp_path: Path):
     repo = tmp_path / "empty_repo"
     (repo / "rules").mkdir(parents=True)
@@ -364,3 +384,168 @@ def test_cancel_via_http_reaches_a_terminal_state(client: TestClient, small_repo
             break
         time.sleep(0.05)
     assert status in ("done", "cancelled", "error")
+
+
+# --- Task 8: job persistence across a server restart -----------------------
+
+
+def test_job_survives_a_simulated_restart(tmp_path: Path, small_repo: Path):
+    """A finished job, looked up via a BRAND NEW create_app() call against
+    the same db_path (simulating the server process dying and restarting),
+    must still be there with its real result - not silently lost."""
+    from mechanic.gui import job_store
+
+    db_path = tmp_path / "gui_jobs.sqlite3"
+    client1 = TestClient(create_app(db_path=db_path))
+    job_id = _load_and_wait(client1, small_repo)
+    result_before = client1.get(f"/api/jobs/{job_id}/result", params={"ordering": "tier_first"}).json()
+
+    # Simulate a restart: a fresh app instance, same db_path, no shared
+    # Python state carried over on purpose (re-imports would be a stronger
+    # simulation than this process allows, but a fresh create_app() call
+    # re-reading from disk is exactly the code path an actual restart runs).
+    client2 = TestClient(create_app(db_path=db_path))
+    status_after = client2.get(f"/api/jobs/{job_id}").json()
+    assert status_after["status"] == "done"
+    # A restored job's report is persisted as a plain dict (see
+    # job_store.save_job), so - same as the pre-existing "load from report"
+    # behavior this deliberately matches - `ordering`/`top_n` query params
+    # are no longer re-applied server-side; the persisted JSON is already
+    # baked with TriageReport.to_dict()'s own default ordering
+    # ("tier_first"), so that's what's requested here for a fair comparison.
+    result_after = client2.get(f"/api/jobs/{job_id}/result", params={"ordering": "tier_first"}).json()
+    assert result_after == result_before
+
+
+def test_running_job_marked_interrupted_after_restart(tmp_path: Path):
+    """A job that was NOT in a terminal state when persisted (simulating
+    the process dying mid-computation) must come back as `interrupted` at
+    the next startup - never silently `done`, and never left looking like
+    it's still in progress forever."""
+    from mechanic.gui import job_store
+
+    db_path = tmp_path / "gui_jobs.sqlite3"
+    conn = job_store.connect(db_path)
+    fake_job = Job(id="was-running", path="/some/repo", fmt="sigma", subdir="rules", mechanical_threshold=0.10)
+    fake_job.status = "semantic_diff"  # mid-flight when "the process died"
+    job_store.save_job(conn, fake_job)
+    conn.close()
+
+    client = TestClient(create_app(db_path=db_path))
+    status = client.get("/api/jobs/was-running").json()
+    assert status["status"] == "interrupted"
+
+
+def test_interrupted_job_result_is_409_not_a_fake_success(tmp_path: Path):
+    from mechanic.gui import job_store
+
+    db_path = tmp_path / "gui_jobs.sqlite3"
+    conn = job_store.connect(db_path)
+    fake_job = Job(id="was-running2", path="/some/repo", fmt="sigma", subdir="rules", mechanical_threshold=0.10)
+    fake_job.status = "classifying"
+    job_store.save_job(conn, fake_job)
+    conn.close()
+
+    client = TestClient(create_app(db_path=db_path))
+    resp = client.get("/api/jobs/was-running2/result")
+    assert resp.status_code == 409
+
+
+def test_interrupted_job_cancel_is_a_safe_noop(tmp_path: Path):
+    from mechanic.gui import job_store
+
+    db_path = tmp_path / "gui_jobs.sqlite3"
+    conn = job_store.connect(db_path)
+    fake_job = Job(id="was-running3", path="/some/repo", fmt="sigma", subdir="rules", mechanical_threshold=0.10)
+    fake_job.status = "mining"
+    job_store.save_job(conn, fake_job)
+    conn.close()
+
+    client = TestClient(create_app(db_path=db_path))
+    resp = client.post("/api/jobs/was-running3/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "interrupted"
+
+
+def test_failed_job_survives_restart_with_its_error(tmp_path: Path):
+    """A `done`/`error`/`cancelled` job is a genuinely terminal, correctly
+    persisted state - NOT reclassified as interrupted on restart."""
+    from mechanic.gui import job_store
+
+    db_path = tmp_path / "gui_jobs.sqlite3"
+    conn = job_store.connect(db_path)
+    fake_job = Job(id="failed-job", path="/no/such/repo", fmt="sigma", subdir="rules", mechanical_threshold=0.10)
+    fake_job.status = "error"
+    fake_job.error = "no git history"
+    fake_job.finished_at = time.time()
+    job_store.save_job(conn, fake_job)
+    conn.close()
+
+    client = TestClient(create_app(db_path=db_path))
+    status = client.get("/api/jobs/failed-job").json()
+    assert status["status"] == "error"
+    assert status["error"] == "no git history"
+
+
+def test_restored_done_job_repopulates_rule_history(tmp_path: Path, small_repo: Path):
+    """A restored `done` job's rule-history tab must recover (via
+    `_mine_for_history_async`, a disk-cache HIT since the repo hasn't moved)
+    rather than staying permanently unavailable just because `all_facts`
+    itself is never persisted."""
+    db_path = tmp_path / "gui_jobs.sqlite3"
+    client1 = TestClient(create_app(db_path=db_path))
+    job_id = _load_and_wait(client1, small_repo)
+
+    client2 = TestClient(create_app(db_path=db_path))
+    deadline = time.time() + 15.0
+    history = None
+    while time.time() < deadline:
+        resp = client2.get(f"/api/jobs/{job_id}/rule-history", params={"file": "good.yml"})
+        if resp.status_code == 200:
+            history = resp.json()
+            break
+        time.sleep(0.1)
+    assert history is not None, "rule-history never recovered after simulated restart"
+
+
+def test_progress_ticks_are_not_persisted_on_every_call(tmp_path: Path, small_repo: Path, monkeypatch):
+    """Durability writes happen on STAGE TRANSITIONS, not every done/total
+    tick - `_run_job`'s real `progress_cb`, exercised directly, firing many
+    times within the SAME stage must not turn into that many SQLite
+    writes."""
+    from mechanic.gui import job_store, server as server_module
+
+    db_path = tmp_path / "gui_jobs.sqlite3"
+    conn = job_store.connect(db_path)
+    server_module._DB_CONN = conn
+
+    write_count = {"n": 0}
+    real_save = job_store.save_job
+
+    def _counting_save(conn_, job_):
+        write_count["n"] += 1
+        return real_save(conn_, job_)
+
+    monkeypatch.setattr(job_store, "save_job", _counting_save)
+
+    def _fake_compute_triage(root, fmt, mechanical_threshold, subdir=None, all_facts=None, progress_cb=None, **kwargs):
+        # One real stage transition ("classifying"), then 50 ticks WITHIN
+        # that same stage - exactly the shape the dominant real stages
+        # (semantic_diff/classifying) actually produce on a big repo.
+        for i in range(50):
+            progress_cb("classifying", i, 50, f"rule{i}.yml")
+        return priority.TriageReport(
+            root=str(root), fmt=fmt, mechanical_threshold=mechanical_threshold,
+            rule_count=0, scoreable=[], unscoreable=[], disclosure="",
+        )
+
+    monkeypatch.setattr(server_module.churn, "mine_commits_cached", lambda *a, **k: [])
+    monkeypatch.setattr(server_module.priority, "compute_triage", _fake_compute_triage)
+
+    job = Job(id="tick-test", path=str(small_repo), fmt="sigma", subdir="rules", mechanical_threshold=0.10)
+    server_module._run_job(job)
+
+    conn.close()
+    # One write for the mining->classifying transition, one for the final
+    # "done" terminal state - never anywhere near the 50 progress ticks.
+    assert write_count["n"] <= 2

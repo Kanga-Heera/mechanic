@@ -554,6 +554,12 @@ class TriageReport:
     scoreable: list[RuleSignals]
     unscoreable: list[RuleSignals]
     disclosure: str
+    # Passed through from churn.StalenessReport (see churn.py's
+    # `_assess_history_health`) - "healthy" unless the repo's mined history
+    # was too thin for the staleness/never-revised signals above to be
+    # reliable. Never blocks triage from running; purely a caveat.
+    history_health: str = "healthy"
+    history_health_reasons: list[str] = field(default_factory=list)
 
     def one_line_summary(self) -> str:
         """"N rules, X fragile, Y stale, Z need attention (fragile AND
@@ -664,6 +670,8 @@ class TriageReport:
             "priority_breakdown": self.priority_breakdown(),
             "priority_matrix": priority_matrix_schema(),
             "disclosure": self.disclosure,
+            "history_health": self.history_health,
+            "history_health_reasons": self.history_health_reasons,
             "rules": [r.to_dict() for r in ordered],
             "unscoreable": [r.to_dict() for r in self.unscoreable],
         }
@@ -714,6 +722,7 @@ def compute_triage(
     all_facts: Optional[list] = None,
     refresh: bool = False,
     progress_cb: Optional[Callable[[str, int, int], None]] = None,
+    mining_timeout: Optional[float] = None,
 ) -> TriageReport:
     """Single entry point: mines git history once (from a disk cache when
     available - see `churn.mine_commits_cached`), runs staleness + semantic
@@ -750,6 +759,12 @@ def compute_triage(
     computation at that checkpoint (the GUI uses this for its Stop button -
     see `mechanic/gui/server.py`); this function does nothing special with
     that beyond letting the exception propagate, same as any other error.
+
+    `mining_timeout`, if given (seconds), bounds the mining pass with a hard
+    wall-clock budget (`churn.MiningTimeoutError` on expiry) - see
+    `churn._mine_with_timeout`. Ignored when `all_facts` is supplied
+    directly (no mining happens in that case). `None` (default) behaves
+    exactly as before this parameter existed - no timeout is applied.
     `None` by default, and every existing core CLI call site passes
     nothing, so behavior and output are byte-for-byte unchanged when it's
     not used.
@@ -758,7 +773,9 @@ def compute_triage(
     as_of = as_of or date.today()
     if all_facts is None:
         mining_cb = (lambda stage, n: progress_cb(stage, n, 0)) if progress_cb is not None else None
-        all_facts = churn.mine_commits_cached(root, fmt, subdir=subdir, refresh=refresh, progress_cb=mining_cb)
+        all_facts = churn.mine_commits_cached(
+            root, fmt, subdir=subdir, refresh=refresh, progress_cb=mining_cb, timeout=mining_timeout
+        )
     if progress_cb is not None:
         progress_cb("staleness", 0, 1)
     staleness_report = churn.compute_staleness(root, fmt, mechanical_threshold, as_of=as_of, subdir=subdir, all_facts=all_facts)
@@ -827,4 +844,6 @@ def compute_triage(
         scoreable=scoreable,
         unscoreable=unscoreable,
         disclosure=_DISCLOSURE,
+        history_health=staleness_report.history_health,
+        history_health_reasons=staleness_report.history_health_reasons,
     )

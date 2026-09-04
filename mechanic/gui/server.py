@@ -32,8 +32,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from mechanic import churn, priority
+from mechanic.gui import job_store
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Set by `create_app()` - the sqlite3 connection every job-mutating endpoint
+# and `_run_job`/`_mine_for_history_async` persist through. A module-level
+# global, same pattern as `_JOBS`/`_JOBS_LOCK` below (this file already
+# shares those across repeated `create_app()` calls - e.g. one per test -
+# so `_DB_CONN` follows the same convention rather than introducing a new
+# one). `None` until the first `create_app()` call.
+_DB_CONN = None
 
 
 class JobCancelled(Exception):
@@ -58,7 +67,11 @@ class Job:
     fmt: str
     subdir: Optional[str]
     mechanical_threshold: float
-    status: str = "pending"  # pending|mining|staleness|semantic_diff|classifying|done|cancelled|error
+    # pending|mining|staleness|semantic_diff|classifying|done|cancelled|error|interrupted
+    # ("interrupted" is never set by _run_job itself - only by job_store.
+    # mark_interrupted at server startup, for a job that was in any
+    # non-terminal state when the process previously died.)
+    status: str = "pending"
     done: int = 0
     total: int = 0
     detail: str = ""  # e.g. the file currently being diffed/classified
@@ -91,8 +104,24 @@ _JOBS: dict[str, Job] = {}
 _JOBS_LOCK = threading.Lock()
 
 
+def _persist(job: Job) -> None:
+    """Best-effort durability write - see job_store.py. Never raises into a
+    job thread or a request handler: a persistence failure (disk full, a
+    locked file) must degrade to "this job won't survive a restart", never
+    to "this job's actual analysis crashed."."""
+    if _DB_CONN is None:
+        return
+    try:
+        job_store.save_job(_DB_CONN, job)
+    except Exception:  # noqa: BLE001 - durability is best-effort, never fatal
+        pass
+
+
 def _run_job(job: Job) -> None:
+    last_persisted_status = job.status
+
     def progress_cb(stage: str, done: int, total: int, detail: str = "") -> None:
+        nonlocal last_persisted_status
         if job.cancel_requested.is_set():
             raise JobCancelled()
         with _JOBS_LOCK:
@@ -100,6 +129,14 @@ def _run_job(job: Job) -> None:
             job.done = done
             job.total = total
             job.detail = detail
+        # Persisted on STAGE TRANSITIONS only, not every done/total tick -
+        # the dominant semantic_diff stage alone can fire this hundreds of
+        # times a second on a big repo; writing SQLite that often would
+        # turn durability into a real performance regression for no
+        # benefit an "interrupted" catch-all status doesn't already cover.
+        if job.status != last_persisted_status:
+            last_persisted_status = job.status
+            _persist(job)
 
     try:
         root = Path(job.path)
@@ -109,7 +146,11 @@ def _run_job(job: Job) -> None:
         # `compute_triage` would make internally either way, not a second
         # mining pass, not a new analysis.
         all_facts = churn.mine_commits_cached(
-            root, job.fmt, subdir=job.subdir, progress_cb=lambda stage, n: progress_cb(stage, n, 0)
+            root,
+            job.fmt,
+            subdir=job.subdir,
+            progress_cb=lambda stage, n: progress_cb(stage, n, 0),
+            timeout=churn.DEFAULT_MINING_TIMEOUT_SECONDS,
         )
         report = priority.compute_triage(
             root,
@@ -124,10 +165,12 @@ def _run_job(job: Job) -> None:
             job.all_facts = all_facts
             job.status = "done"
             job.finished_at = time.time()
+        _persist(job)
     except JobCancelled:
         with _JOBS_LOCK:
             job.status = "cancelled"
             job.finished_at = time.time()
+        _persist(job)
     except churn.ChurnError as e:
         # The core's own LOUD failure (no .git, shallow clone, etc.) -
         # surfaced verbatim, not swallowed or turned into an empty result.
@@ -135,11 +178,13 @@ def _run_job(job: Job) -> None:
             job.error = str(e)
             job.status = "error"
             job.finished_at = time.time()
+        _persist(job)
     except Exception as e:  # noqa: BLE001 - a job thread must never die silently
         with _JOBS_LOCK:
             job.error = f"{type(e).__name__}: {e}"
             job.status = "error"
             job.finished_at = time.time()
+        _persist(job)
 
 
 def _commit_history_for_file(all_facts: list, file_rel: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -212,7 +257,55 @@ def _mine_for_history_async(job: Job, root: Path) -> None:
         pass
 
 
-def create_app() -> FastAPI:
+def _restore_jobs_from_disk() -> None:
+    """Called once, from `create_app()`, before serving any request:
+    reclassifies any non-terminal persisted job as `interrupted` (the
+    process died while it was running - see job_store.mark_interrupted),
+    then loads every persisted job back into `_JOBS` so `/api/jobs/{id}`
+    and friends work immediately after a restart, no reload required.
+
+    Restored jobs never carry `all_facts` (not persisted - see job_store.py's
+    module docstring) or a live `cancel_requested` thread - a restored job
+    is never "running" in this process, cancel-ability is meaningless for
+    it. A restored `done` job kicks off `_mine_for_history_async` in the
+    background so its rule-history tab recovers too (a cache HIT in the
+    common case), same as a job loaded via /api/load-from-report."""
+    if _DB_CONN is None:
+        return
+    ids = job_store.mark_interrupted(_DB_CONN)
+    if ids:
+        print(f"[mechanic-gui] {len(ids)} job(s) were still running at last shutdown - marked interrupted: {ids}", flush=True)
+    for row in job_store.load_all_jobs(_DB_CONN):
+        job = Job(
+            id=row["id"],
+            path=row["path"],
+            fmt=row["fmt"],
+            subdir=row["subdir"],
+            mechanical_threshold=row["mechanical_threshold"],
+            status=row["status"],
+            error=row["error"],
+            report=row["report"],
+            created_at=row["created_at"],
+            finished_at=row["finished_at"],
+        )
+        with _JOBS_LOCK:
+            _JOBS[job.id] = job
+        if job.status == "done" and job.report is not None:
+            threading.Thread(target=_mine_for_history_async, args=(job, Path(job.path)), daemon=True).start()
+
+
+def create_app(db_path: Optional[Path] = None) -> FastAPI:
+    """`db_path`, if given, overrides where job state is persisted
+    (job_store.DEFAULT_DB_PATH otherwise) - tests always pass a `tmp_path`
+    location so they never touch a real user's `~/.mechanic/`. Every
+    `create_app()` call (re)connects and restores from THAT path, following
+    this module's existing convention of sharing `_JOBS`/`_JOBS_LOCK` as
+    module-level state across repeated calls (one real call per `mechanic
+    gui` process; one per test)."""
+    global _DB_CONN
+    _DB_CONN = job_store.connect(db_path or job_store.DEFAULT_DB_PATH)
+    _restore_jobs_from_disk()
+
     app = FastAPI(title="mechanic GUI", docs_url=None, redoc_url=None)
 
     @app.post("/api/load")
@@ -229,6 +322,7 @@ def create_app() -> FastAPI:
         )
         with _JOBS_LOCK:
             _JOBS[job.id] = job
+        _persist(job)
         thread = threading.Thread(target=_run_job, args=(job,), daemon=True)
         thread.start()
         return {"job_id": job.id}
@@ -264,6 +358,7 @@ def create_app() -> FastAPI:
         )
         with _JOBS_LOCK:
             _JOBS[job.id] = job
+        _persist(job)
         threading.Thread(target=_mine_for_history_async, args=(job, root), daemon=True).start()
         return {"job_id": job.id}
 
@@ -274,13 +369,14 @@ def create_app() -> FastAPI:
         `JobCancelled` above) - during the dominant semantic-diff stage
         that's before the next file is diffed, so in practice this is
         responsive; during the (fast) staleness stage it can lag up to
-        that stage's own few seconds. A job already done/errored/cancelled
-        is left alone - this can't undo a finished result."""
+        that stage's own few seconds. A job already
+        done/errored/cancelled/interrupted is left alone - this can't undo
+        a finished (or already-dead) result."""
         with _JOBS_LOCK:
             job = _JOBS.get(job_id)
             if job is None:
                 raise HTTPException(404, "unknown job_id")
-            if job.status in ("done", "error", "cancelled"):
+            if job.status in job_store.TERMINAL_STATUSES:
                 return job.status_dict()
             job.cancel_requested.set()
         return job.status_dict()
@@ -307,6 +403,10 @@ def create_app() -> FastAPI:
                 raise HTTPException(422, job.error or "job failed")
             if job.status == "cancelled":
                 raise HTTPException(422, "cancelled by user")
+            if job.status == "interrupted":
+                raise HTTPException(
+                    409, "this job was still running when the server was last restarted, so it never finished - reload this repo to compute it again"
+                )
             if job.status != "done" or job.report is None:
                 raise HTTPException(425, f"job not finished yet (status={job.status})")
             if isinstance(job.report, dict):
@@ -391,17 +491,25 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
-
-
 def run_server(host: str = "127.0.0.1", port: int = 8642, open_browser: bool = True) -> None:
     """Blocking call - starts uvicorn, optionally opening a browser tab
     shortly after (uvicorn.run() itself blocks, so the browser-open is
-    scheduled on a short timer beforehand rather than sequenced after)."""
+    scheduled on a short timer beforehand rather than sequenced after).
+
+    `create_app()` is called HERE, not at module import time (it used to be
+    a module-level `app = create_app()`, kept only for `uvicorn.run(app,
+    ...)`'s convenience) - `create_app()` now does real I/O (connects to
+    the job-persistence sqlite3 database and restores jobs from it, see
+    job_store.py), which must never happen as a side effect of merely
+    importing this module. Importing `mechanic.gui.server` (e.g. to reuse
+    `Job`/`_run_job` in a test, or via mechanic.cli's lazy import) must stay
+    inert - this is exactly the same "no surprise side effects from an
+    import" principle `docs/core-vs-experiment.md` enforces for the
+    repair experiment, applied to this module's own database connection."""
     import uvicorn
 
     url = f"http://{host}:{port}/"
     if open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     print(f"[mechanic-gui] serving at {url} (offline, no network calls made by this process)")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    uvicorn.run(create_app(), host=host, port=port, log_level="warning")

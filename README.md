@@ -33,6 +33,16 @@ judge ATT&CK coverage or claim to catch every possible evasion — see
 `RESULTS.md` for every disclosed limitation, not just the ones repeated
 here.
 
+**Mechanic measures:**
+- staleness (git-driven organic-revision behavior — `churn.py`/`semantic_diff.py`)
+- structural fragility (`fragility.py`/`structural_detectors.py`, STP-validated for Sigma)
+- a review-priority ORDERING derived from those two axes (`priority.py`) — never a fused/weighted score (see Part 3 in `RESULTS.md`)
+
+**Mechanic does NOT measure:**
+- event robustness (MITRE STP's separate analytic-robustness axis — mechanic's apparent weak correlation with it is coincidental field overlap, not a real second dimension; see RESULTS.md's Task 7 correlation experiment). Not on the roadmap for this stage — stated as a genuine scope boundary, not a gap accidentally left unfilled.
+- ATT&CK technique-proximity/coverage
+- evadability against a specific, real adversary (a manual/academic exercise, not what repository-scale triage can claim)
+
 ## Why this exists
 
 Two things fell out of prior investigation into pySigma/sigma-cli and five

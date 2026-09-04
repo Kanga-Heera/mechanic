@@ -18,6 +18,18 @@ err_console = Console(stderr=True)
 
 _FMT_CHOICE = click.Choice(sorted(FORMATS))
 
+
+def _mining_timeout_option():
+    # See churn.DEFAULT_MINING_TIMEOUT_SECONDS for why this default was
+    # chosen. `--mining-timeout 0` disables it.
+    return click.option(
+        "--mining-timeout",
+        default=churn.DEFAULT_MINING_TIMEOUT_SECONDS,
+        show_default=True,
+        type=int,
+        help="Abort git-history mining after this many seconds instead of risking an indefinite hang. 0 disables the timeout.",
+    )
+
 # --- rich-click presentation config (help/usage screens only - no effect on
 # actual argument parsing, which is stock click underneath) ---------------
 click.rich_click.USE_RICH_MARKUP = True
@@ -122,7 +134,29 @@ def _render_scan_report(result: loader.ScanResult, validate_failures: list[loade
     console.print(detail)
 
 
+_HISTORY_HEALTH_MESSAGES = {
+    "insufficient_total_commits": (
+        "fewer than 5 total commits were mined - percentages below are computed "
+        "from real numbers, but there isn't enough history for them to be reliable."
+    ),
+    "mechanical_threshold_excluded_all_history": (
+        "every mined commit was filtered out as mechanical - every rule below shows "
+        "zero organic history, not because the rules are actually fresh, but because "
+        "this repo's whole visible history looked like a bulk import at this "
+        "threshold. Try a higher --mechanical-threshold or a repo with more history."
+    ),
+}
+
+
 def _render_staleness_report(report: churn.StalenessReport, top_n: int) -> None:
+    if report.history_health != "healthy":
+        console.print(
+            "[bold yellow]WARNING: degraded git history[/bold yellow] - staleness numbers below are "
+            "real, not fabricated, but treat them with caution:"
+        )
+        for reason in report.history_health_reasons:
+            console.print(f"  - {_HISTORY_HEALTH_MESSAGES.get(reason, reason)}")
+
     summary = report.summary()
     t = Table(title=f"mechanic staleness — {report.root}")
     t.add_column("metric")
@@ -163,7 +197,8 @@ def _render_staleness_report(report: churn.StalenessReport, top_n: int) -> None:
     stalest.add_column("organic commits", justify="right")
     stalest.add_column("ever revised")
     for r in report.top_stalest(top_n):
-        stalest.add_row(r.file, str(r.days_since), str(r.organic_commit_count), str(r.ever_revised))
+        revised_label = "UNKNOWN" if r.ever_revised is None else str(r.ever_revised)
+        stalest.add_row(r.file, str(r.days_since), str(r.organic_commit_count), revised_label)
     console.print(stalest)
 
 
@@ -431,9 +466,16 @@ def scan(path: Path, fmt: str, as_json: bool) -> None:
     default=None,
     help="Restrict rule discovery/counting to this path within the repo (git root stays at PATH).",
 )
+@_mining_timeout_option()
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON instead of tables.")
 def staleness(
-    path: Path, fmt: str, mechanical_threshold: float, top_n: int, subdir: Optional[str], as_json: bool
+    path: Path,
+    fmt: str,
+    mechanical_threshold: float,
+    top_n: int,
+    subdir: Optional[str],
+    mining_timeout: int,
+    as_json: bool,
 ) -> None:
     """Behavioral churn: which rules has nobody organically touched?
 
@@ -450,7 +492,9 @@ def staleness(
       mechanic staleness --fmt splunk_yaml --subdir detections ./splunk-security-content
     """
     try:
-        report = churn.compute_staleness(path, fmt, mechanical_threshold, subdir=subdir)
+        report = churn.compute_staleness(
+            path, fmt, mechanical_threshold, subdir=subdir, timeout=(mining_timeout or None)
+        )
     except churn.ChurnError as e:
         err_console.print(f"[red]{e}[/red]")
         raise SystemExit(1)
@@ -500,6 +544,7 @@ def ast(file: Path, as_json: bool) -> None:
 )
 @click.option("--top", "top_n", default=20, show_default=True, type=int, help="How many of the stalest rules to show.")
 @click.option("--subdir", default=None, help="Restrict staleness to this path within the repo.")
+@_mining_timeout_option()
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON instead of tables.")
 def report(
     path: Path,
@@ -507,6 +552,7 @@ def report(
     mechanical_threshold: float,
     top_n: int,
     subdir: Optional[str],
+    mining_timeout: int,
     as_json: bool,
 ) -> None:
     """Run `scan` and `staleness` together in one pass.
@@ -523,7 +569,9 @@ def report(
     """
     result, validate_failures = _scan(path, fmt)
     try:
-        staleness_report = churn.compute_staleness(path, fmt, mechanical_threshold, subdir=subdir)
+        staleness_report = churn.compute_staleness(
+            path, fmt, mechanical_threshold, subdir=subdir, timeout=(mining_timeout or None)
+        )
         staleness_error = None
     except churn.ChurnError as e:
         staleness_report = None
@@ -569,6 +617,7 @@ def report(
     show_default=True,
     help="Which unweighted sort/lookup strategy to scan by (no combined score exists - see RESULTS.md).",
 )
+@_mining_timeout_option()
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON instead of tables.")
 def triage(
     path: Path,
@@ -578,6 +627,7 @@ def triage(
     subdir: Optional[str],
     refresh: bool,
     ordering: str,
+    mining_timeout: int,
     as_json: bool,
 ) -> None:
     """Staleness and fragility, side by side, sorted for review.
@@ -599,7 +649,9 @@ def triage(
       mechanic triage --json ./sigma --subdir rules | jq '.rules[0]'
     """
     try:
-        report = priority.compute_triage(path, fmt, mechanical_threshold, subdir=subdir, refresh=refresh)
+        report = priority.compute_triage(
+            path, fmt, mechanical_threshold, subdir=subdir, refresh=refresh, mining_timeout=(mining_timeout or None)
+        )
     except churn.ChurnError as e:
         err_console.print(f"[red]{e}[/red]")
         raise SystemExit(1)
@@ -625,9 +677,16 @@ def triage(
 @click.option(
     "--refresh", is_flag=True, help="Force re-mining git history, ignoring any cached mine_commits result."
 )
+@_mining_timeout_option()
 @click.option("--json", "as_json", is_flag=True, help="Print machine-readable JSON instead of prose + tables.")
 def explain(
-    file: Path, fmt: str, mechanical_threshold: float, subdir: Optional[str], refresh: bool, as_json: bool
+    file: Path,
+    fmt: str,
+    mechanical_threshold: float,
+    subdir: Optional[str],
+    refresh: bool,
+    mining_timeout: int,
+    as_json: bool,
 ) -> None:
     """Plain-English justification for why one rule sits where it does.
 
@@ -653,7 +712,9 @@ def explain(
             raise SystemExit(1)
         root = root.parent
     try:
-        report = priority.compute_triage(root, fmt, mechanical_threshold, subdir=subdir, refresh=refresh)
+        report = priority.compute_triage(
+            root, fmt, mechanical_threshold, subdir=subdir, refresh=refresh, mining_timeout=(mining_timeout or None)
+        )
     except churn.ChurnError as e:
         err_console.print(f"[red]{e}[/red]")
         raise SystemExit(1)

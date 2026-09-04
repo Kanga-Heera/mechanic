@@ -18,6 +18,7 @@ from __future__ import annotations
 import pickle
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -34,6 +35,32 @@ DEFAULT_THRESHOLD = 0.10
 REPORT_THRESHOLDS = (0.05, 0.10, 0.20)
 STALE_DAYS = 730  # > 2 years
 RECENT_DAYS = 182  # touched within 6 months
+
+# Below this many total mined commits, staleness statistics are still
+# computed (this is NOT a hard failure like NoGitHistoryError/
+# ShallowRepositoryError - some history exists and every number reported is
+# real), but there simply isn't enough history for the resulting percentages
+# to mean much. Deliberately small and conservative: this is a floor below
+# which "insufficient" is unambiguous, not a tuned-to-look-good number, and
+# genuinely borderline repos (dozens of commits) are left as HEALTHY rather
+# than manufacturing a false sense of precision about exactly where
+# "enough" begins.
+DEGRADED_HISTORY_MIN_COMMITS = 5
+
+HEALTH_HEALTHY = "healthy"
+HEALTH_DEGRADED = "degraded"
+
+# Shared default for every caller that wants SOME timeout protection without
+# picking a number itself (the CLI's `--mining-timeout` default, and the
+# GUI's job runner). 30 minutes is generous enough for every corpus this
+# project has actually mined (SigmaHQ/Elastic/Splunk all finish well under
+# that - RESULTS.md's timing section) while still turning a genuine hang
+# into a clear, bounded failure instead of an indefinite one. The library
+# functions themselves (`mine_commits`, `compute_staleness`, ...) still
+# default their own `timeout` parameter to `None` (no timeout) - this
+# constant is an opt-in convenience for callers, never a silently-changed
+# default behavior.
+DEFAULT_MINING_TIMEOUT_SECONDS = 1800
 
 
 class ChurnError(Exception):
@@ -59,6 +86,83 @@ class ShallowRepositoryError(ChurnError):
         )
 
 
+class MiningTimeoutError(ChurnError):
+    """Raised when a full-history mining pass exceeds its wall-clock budget.
+
+    Context: `_modified_files_no_patch`'s own docstring documents a real,
+    reproducibly diagnosed (via `py-spy dump`) GitPython/Windows deadlock in
+    `Diffable.diff()`'s stdout/stderr-pumping threads, hit while mining
+    `splunk/security_content`'s ~28,000-commit history - already fixed by
+    replacing that specific call with a plain `git diff-tree` subprocess
+    call carrying its own 30-second timeout, which cannot deadlock the same
+    way (confirmed by benchmark: all 28,249 commits diffed in ~18 minutes
+    with zero hangs). This timeout is a SEPARATE, outer safety net around
+    the WHOLE mining pass (commit walking, not just per-commit diffing) -
+    defense-in-depth against a different or future hang, not a re-fix of an
+    already-fixed one.
+
+    Known limitation, stated rather than hidden: this is implemented as a
+    daemon background thread with `.join(timeout=...)`, not a killable
+    subprocess. Python has no safe, cross-platform way to forcibly
+    terminate a thread blocked in a C-level blocking call - so on timeout,
+    control returns to the caller immediately (the process does NOT hang),
+    but the orphaned mining thread may continue running in the background
+    until it finishes on its own or the process exits (a daemon thread is
+    reclaimed by the OS at process exit, not left as a zombie). A true
+    subprocess-based kill was considered and rejected here as
+    disproportionate: it would need to serialize `_CommitFacts` across a
+    process boundary and reimplement `progress_cb` over IPC, for a failure
+    class (an indefinite hang with zero forward progress) this project has
+    only ever reproduced in the diff step already fixed above.
+    """
+
+    def __init__(self, root: Path, timeout: float):
+        super().__init__(
+            f"mining {root} exceeded the {timeout:.0f}s mining timeout with no result. "
+            "This is a wall-clock safety net, not a claim about what's wrong with the "
+            "repo - rerun with a larger --mining-timeout if this repo is just large, or "
+            "investigate (e.g. `py-spy dump` on the mechanic process) if it recurs on a "
+            "repo that previously mined fine."
+        )
+        self.root = root
+        self.timeout = timeout
+
+
+def _mine_with_timeout(fn: Callable[[], list["_CommitFacts"]], root: Path, timeout: Optional[float]) -> list["_CommitFacts"]:
+    """Runs `fn` (a zero-arg thunk wrapping a full mining pass) directly if
+    `timeout` is None (the default - every existing call site is
+    byte-for-byte unaffected), otherwise on a daemon background thread with
+    a hard wall-clock join timeout. See `MiningTimeoutError` for exactly
+    what this does and does not guarantee."""
+    if timeout is None:
+        return fn()
+
+    result: dict[str, Any] = {}
+    error: dict[str, BaseException] = {}
+
+    def _worker() -> None:
+        try:
+            result["facts"] = fn()
+        except BaseException as e:  # re-raised on the calling thread below
+            error["exc"] = e
+
+    t = threading.Thread(target=_worker, daemon=True, name="mechanic-mining")
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        print(
+            f"[mechanic] MINING TIMEOUT: {root} exceeded {timeout:.0f}s - aborting this "
+            "mining attempt (the background thread may continue running; see "
+            "MiningTimeoutError's docstring for why it cannot be forcibly killed).",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise MiningTimeoutError(root, timeout)
+    if "exc" in error:
+        raise error["exc"]
+    return result["facts"]
+
+
 @dataclass
 class ExcludedCommit:
     hash: str
@@ -79,7 +183,13 @@ class RuleChurn:
     organic_commit_count: int
     last_organic_commit_date: Optional[date]
     days_since: Optional[int]
-    ever_revised: bool
+    # Optional[bool]: None means "cannot be determined from available git
+    # history" - NOT a silent false. See `_ever_revised` for exactly which
+    # cases resolve to True/False/None and why. `ever_revised_basis` names
+    # the reasoning in every case so a caller never has to guess why a
+    # given value was produced.
+    ever_revised: Optional[bool]
+    ever_revised_basis: str
     distinct_author_count: int
     # Additive Part 1 (semantic diff) fields. None/absent until a caller runs
     # `mechanic.semantic_diff.enrich_staleness_report` on this report - plain
@@ -102,6 +212,7 @@ class RuleChurn:
             ),
             "days_since": self.days_since,
             "ever_revised": self.ever_revised,
+            "ever_revised_basis": self.ever_revised_basis,
             "distinct_author_count": self.distinct_author_count,
             "behavioral_commit_count": self.behavioral_commit_count,
             "last_behavioral_change": (
@@ -137,6 +248,13 @@ class StalenessReport:
     excluded_commits: list[ExcludedCommit]
     rules: list[RuleChurn] = field(default_factory=list)
     sensitivity: list[ThresholdSensitivity] = field(default_factory=list)
+    # Distinct from NoGitHistoryError/ShallowRepositoryError, which ABORT
+    # before a report is ever built - this describes a report that DID get
+    # built from real (unfaked) numbers, but whose history is thin enough
+    # that those numbers deserve a caveat. "healthy" unless a reason below
+    # fired. Never blocks anything; purely informational.
+    history_health: str = HEALTH_HEALTHY
+    history_health_reasons: list[str] = field(default_factory=list)
 
     @property
     def rules_with_history(self) -> list[RuleChurn]:
@@ -179,6 +297,8 @@ class StalenessReport:
             "summary": self.summary(),
             "sensitivity": [s.to_dict() for s in self.sensitivity],
             "rules": [r.to_dict() for r in self.rules],
+            "history_health": self.history_health,
+            "history_health_reasons": self.history_health_reasons,
         }
         if top_n is not None:
             d["top_stalest"] = [r.to_dict() for r in self.top_stalest(top_n)]
@@ -514,6 +634,7 @@ def mine_organic_touches(
     mechanical_threshold: float = DEFAULT_THRESHOLD,
     subdir: Optional[str] = None,
     all_facts: Optional[list[_CommitFacts]] = None,
+    timeout: Optional[float] = None,
 ) -> list[OrganicTouch]:
     """Pass 1 for Part 1 (semantic diff): every organic, non-merge commit's
     touch on a file that currently exists, resolved to that file's current
@@ -541,7 +662,7 @@ def mine_organic_touches(
     current_rel_paths = {str(p.relative_to(root)).replace("\\", "/") for p in current_files}
 
     if all_facts is None:
-        all_facts = _mine_commits(root, rule_format, subdir_prefix)
+        all_facts = _mine_with_timeout(lambda: _mine_commits(root, rule_format, subdir_prefix), root, timeout)
     if not all_facts:
         raise NoGitHistoryError(root)
 
@@ -593,6 +714,7 @@ def mine_commits_cached(
     subdir: Optional[str] = None,
     refresh: bool = False,
     progress_cb: Optional[Callable[[str, int], None]] = None,
+    timeout: Optional[float] = None,
 ) -> list[_CommitFacts]:
     """Disk-cached wrapper around `mine_commits`, keyed by (repo root, fmt,
     subdir, current `git rev-parse HEAD`).
@@ -629,6 +751,11 @@ def mine_commits_cached(
     with `("mining", commit_count)` while actually mining (see
     `_mine_commits`). Added for the GUI's real progress display; every
     core CLI path passes `None` and behaves exactly as before.
+
+    `timeout`, if given, bounds the actual mining call (never the cache-hit
+    path, which does no mining at all) - see `MiningTimeoutError` and
+    `_mine_with_timeout`. `None` (default) behaves exactly as before this
+    parameter existed.
     """
     root = Path(root)
     _check_git_preconditions(root)
@@ -665,7 +792,7 @@ def mine_commits_cached(
         print(f"[mechanic] cache MISS (none found): mining {root} (fmt={fmt}, subdir={subdir}).", file=sys.stderr, flush=True)
 
     mine_kwargs = {"progress_cb": lambda n: progress_cb("mining", n)} if progress_cb is not None else {}
-    all_facts = mine_commits(root, fmt, subdir=subdir, **mine_kwargs)
+    all_facts = mine_commits(root, fmt, subdir=subdir, timeout=timeout, **mine_kwargs)
     with open(cache_file, "wb") as f:
         pickle.dump((head, all_facts), f)
     print(f"[mechanic] mined and cached {len(all_facts)} commit-facts at HEAD={head[:10]} -> {cache_file}", file=sys.stderr, flush=True)
@@ -677,6 +804,7 @@ def mine_commits(
     fmt: str = "sigma",
     subdir: Optional[str] = None,
     progress_cb: Optional[Callable[[int], None]] = None,
+    timeout: Optional[float] = None,
 ) -> list[_CommitFacts]:
     """Public entry point for a single full-history mining pass.
 
@@ -693,15 +821,90 @@ def mine_commits(
     `progress_cb`, if given, forwards to `_mine_commits` (a running commit
     count, roughly every 250 commits) - optional, `None` by default,
     changes nothing about what's mined or returned.
+
+    `timeout`, if given (seconds), bounds the WHOLE mining pass with a hard
+    wall-clock budget - see `MiningTimeoutError`. `None` (default) behaves
+    exactly as before this parameter existed.
     """
     root = Path(root)
     _check_git_preconditions(root)
     rule_format = FORMATS[fmt] if isinstance(fmt, str) else fmt
     subdir_prefix = subdir.replace("\\", "/").rstrip("/") if subdir else None
-    all_facts = _mine_commits(root, rule_format, subdir_prefix, progress_cb=progress_cb)
+    all_facts = _mine_with_timeout(
+        lambda: _mine_commits(root, rule_format, subdir_prefix, progress_cb=progress_cb), root, timeout
+    )
     if not all_facts:
         raise NoGitHistoryError(root)
     return all_facts
+
+
+def _ever_revised(touches: list[tuple[date, str]]) -> tuple[Optional[bool], str]:
+    """Resolve the `ever_revised` tri-state for one rule from its organic
+    touches (`(author_date, git change_type)`, each already known to be a
+    non-mechanical, non-merge commit touching this file under some path
+    resolving to its current identity - see `compute_staleness`'s caller).
+
+    A single organic commit is NOT inherently ambiguous, contrary to a naive
+    `organic_commit_count > 1` check: git's own `change_type` on that one
+    commit already distinguishes the two cases the ambiguity is actually
+    about -
+
+      ADD             -> the file was newly created in this commit and has
+                          no other organic touch on record: created once,
+                          no revision observed (Case A).
+      MODIFY / RENAME  -> the file already existed before this commit (a
+                          MODIFY/RENAME target always has a prior version by
+                          definition), so a revision did happen at least
+                          once, even though the file's actual creation isn't
+                          itself visible in the organic set (e.g. it
+                          happened inside an excluded mechanical bulk-import
+                          commit) (Case B).
+
+    Zero organic commits is the one case genuinely lacking any signal at
+    all: every touch this file ever had was filtered out as mechanical, so
+    whether it was ever individually revised afterward cannot be determined
+    from this data - reported as UNKNOWN (`None`), never silently `False`.
+    """
+    if not touches:
+        return None, "no_organic_history"
+    if len(touches) > 1:
+        return True, "multiple_organic_commits"
+    _, change_type = touches[0]
+    if change_type == "ADD":
+        return False, "single_commit_creation"
+    return True, "single_commit_modification"
+
+
+def _assess_history_health(all_facts: list[_CommitFacts], rules: list["RuleChurn"]) -> tuple[str, list[str]]:
+    """Soft (non-blocking) degraded-history detection, distinct from the
+    hard NoGitHistoryError/ShallowRepositoryError preconditions that abort
+    before any report is built. Every reason here corresponds to a
+    concrete, previously-observed failure mode - not a speculative check:
+
+    - `insufficient_total_commits`: the whole repo's mined history is too
+      small for percentages computed over it to mean much (a repo with 2
+      total commits reporting "50% of rules revised" is technically true
+      and practically meaningless).
+    - `mechanical_threshold_excluded_all_history`: every mined commit got
+      filtered out as mechanical, so 100% of rules show zero organic
+      history - this is exactly the small-repo-single-commit-touches-every-
+      file shape this project's own test fixtures had to work around
+      (`revised_repo` in tests/test_priority_matrix.py) to get a genuine
+      diffable touch at all. Reported here so a real user hits the same
+      diagnosis instead of silently seeing "0% ever revised" and assuming
+      the rules are actually all fresh-and-untouched.
+
+    Does not attempt to detect squashed history - git has no reliable
+    signal for "this one commit represents what would otherwise have been
+    several" (see docs/core-vs-experiment.md-style disclosure in
+    protected_literals.py for the same kind of honest scope limit).
+    """
+    reasons: list[str] = []
+    if len(all_facts) < DEGRADED_HISTORY_MIN_COMMITS:
+        reasons.append("insufficient_total_commits")
+    if rules and all(r.organic_commit_count == 0 for r in rules):
+        reasons.append("mechanical_threshold_excluded_all_history")
+    return (HEALTH_DEGRADED if reasons else HEALTH_HEALTHY), reasons
 
 
 def compute_staleness(
@@ -711,6 +914,7 @@ def compute_staleness(
     as_of: Optional[date] = None,
     subdir: Optional[str] = None,
     all_facts: Optional[list[_CommitFacts]] = None,
+    timeout: Optional[float] = None,
 ) -> StalenessReport:
     """Compute the staleness report for a repo.
 
@@ -730,6 +934,10 @@ def compute_staleness(
     and reuses the supplied facts - for callers that also need
     `mine_organic_touches`/other consumers on the same repo and want to
     avoid a second full traversal.
+
+    `timeout`, if given (seconds), bounds the mining pass when `all_facts`
+    isn't already supplied - see `MiningTimeoutError`. Ignored (mining never
+    happens) when `all_facts` is given directly.
     """
     root = Path(root)
     _check_git_preconditions(root)
@@ -744,7 +952,7 @@ def compute_staleness(
         raise ChurnError(f"No rule files matching format '{fmt}' found under {rules_root}.")
 
     if all_facts is None:
-        all_facts = _mine_commits(root, rule_format, subdir_prefix)
+        all_facts = _mine_with_timeout(lambda: _mine_commits(root, rule_format, subdir_prefix), root, timeout)
     if not all_facts:
         raise NoGitHistoryError(root)
 
@@ -771,27 +979,36 @@ def compute_staleness(
 
     excluded_hashes, excluded_commits = _build_exclusion(all_facts, rule_count, mechanical_threshold)
 
-    # Per-canonical-current-path aggregation.
+    # Per-canonical-current-path aggregation. Iterates `file_changes` (not the
+    # flattened `rule_paths_touched`) specifically so each touch's git-level
+    # `change_type` (ADD vs MODIFY/RENAME) travels alongside its date - the
+    # signal `_ever_revised` below needs to resolve the single-organic-commit
+    # ambiguity, which the flat path list on its own cannot distinguish.
     current_rel_paths = {str(p.relative_to(root)).replace("\\", "/") for p in current_files}
     per_path: dict[str, dict[str, Any]] = {
-        p: {"dates": [], "authors": set()} for p in current_rel_paths
+        p: {"touches": [], "authors": set()} for p in current_rel_paths
     }
 
     for f in all_facts:
         if f.hash in excluded_hashes:
             continue
-        for touched in f.rule_paths_touched:
+        for fc in f.file_changes:
+            touched = fc.new_path or fc.old_path
+            if touched is None:
+                continue
             canonical = _resolve_canonical(touched, renamed_to)
             if canonical not in per_path:
                 continue  # historical path whose current identity no longer exists (deleted rule)
-            per_path[canonical]["dates"].append(f.author_date)
+            per_path[canonical]["touches"].append((f.author_date, fc.change_type))
             per_path[canonical]["authors"].add(f.author_key)
 
     rules: list[RuleChurn] = []
     for rel_path in sorted(current_rel_paths):
         data = per_path[rel_path]
-        dates: list[date] = data["dates"]
+        touches: list[tuple[date, str]] = data["touches"]
+        dates = [d for d, _ in touches]
         organic_commit_count = len(dates)
+        ever_revised, ever_revised_basis = _ever_revised(touches)
         if organic_commit_count == 0:
             rules.append(
                 RuleChurn(
@@ -799,7 +1016,8 @@ def compute_staleness(
                     organic_commit_count=0,
                     last_organic_commit_date=None,
                     days_since=None,
-                    ever_revised=False,
+                    ever_revised=ever_revised,
+                    ever_revised_basis=ever_revised_basis,
                     distinct_author_count=0,
                 )
             )
@@ -811,11 +1029,13 @@ def compute_staleness(
                 organic_commit_count=organic_commit_count,
                 last_organic_commit_date=last_date,
                 days_since=(as_of - last_date).days,
-                ever_revised=organic_commit_count > 1,
+                ever_revised=ever_revised,
+                ever_revised_basis=ever_revised_basis,
                 distinct_author_count=len(data["authors"]),
             )
         )
 
+    history_health, history_health_reasons = _assess_history_health(all_facts, rules)
     return StalenessReport(
         root=str(root),
         rule_count=rule_count,
@@ -825,4 +1045,6 @@ def compute_staleness(
         excluded_commits=excluded_commits,
         rules=rules,
         sensitivity=sensitivity,
+        history_health=history_health,
+        history_health_reasons=history_health_reasons,
     )

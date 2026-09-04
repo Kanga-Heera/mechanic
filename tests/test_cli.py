@@ -121,6 +121,72 @@ def test_staleness_json_schema(cli_repo: Path):
         assert key in data["summary"]
 
 
+def test_staleness_json_includes_history_health(cli_repo: Path):
+    result = runner.invoke(main, ["staleness", str(cli_repo), "--subdir", "rules", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    assert data["history_health"] in ("healthy", "degraded")
+    assert isinstance(data["history_health_reasons"], list)
+
+
+def test_mining_timeout_option_reaches_compute_staleness(cli_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    seen = {}
+    real = churn.compute_staleness
+
+    def _capturing(*args, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(churn, "compute_staleness", _capturing)
+    result = runner.invoke(main, ["staleness", str(cli_repo), "--subdir", "rules", "--mining-timeout", "45"])
+    assert result.exit_code == 0, result.output
+    assert seen["timeout"] == 45
+
+
+def test_mining_timeout_zero_disables_it(cli_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    seen = {}
+    real = churn.compute_staleness
+
+    def _capturing(*args, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(churn, "compute_staleness", _capturing)
+    result = runner.invoke(main, ["staleness", str(cli_repo), "--subdir", "rules", "--mining-timeout", "0"])
+    assert result.exit_code == 0, result.output
+    assert seen["timeout"] is None
+
+
+def test_mining_timeout_error_reported_cleanly_not_a_crash(cli_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    """A MiningTimeoutError is a churn.ChurnError - the CLI's existing
+    `except churn.ChurnError` handler must catch it exactly like
+    NoGitHistoryError/ShallowRepositoryError: a clean red message and exit
+    code 1, never an uncaught traceback."""
+
+    def _timeout(*args, **kwargs):
+        raise churn.MiningTimeoutError(cli_repo, 45)
+
+    monkeypatch.setattr(churn, "compute_staleness", _timeout)
+    result = runner.invoke(main, ["staleness", str(cli_repo), "--subdir", "rules"])
+    assert result.exit_code == 1
+    assert "mining timeout" in result.output.lower() or "exceeded" in result.output.lower()
+
+
+def test_mining_timeout_option_reaches_compute_triage(cli_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    seen = {}
+    real = __import__("mechanic.priority", fromlist=["compute_triage"]).compute_triage
+    from mechanic import priority
+
+    def _capturing(*args, **kwargs):
+        seen["mining_timeout"] = kwargs.get("mining_timeout")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(priority, "compute_triage", _capturing)
+    result = runner.invoke(main, ["triage", str(cli_repo), "--subdir", "rules", "--mining-timeout", "45"])
+    assert result.exit_code == 0, result.output
+    assert seen["mining_timeout"] == 45
+
+
 # --- triage ---------------------------------------------------------------
 
 

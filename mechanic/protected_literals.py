@@ -86,6 +86,48 @@ external definition, not of what anyone happened to hand-verify:
                                disclosed gap rather than folded in here just
                                because it shares the "OS-defined path"
                                shape - see RESULTS.md).
+  posix_capabilities         - the fixed, kernel-defined Linux capability
+                               names (capabilities(7)) - CAP_SYS_ADMIN,
+                               CAP_NET_ADMIN, CAP_DAC_OVERRIDE, etc. An
+                               attacker cannot rename a capability and keep
+                               its kernel-enforced effect (granting
+                               CAP_SYS_ADMIN under any other name is not
+                               possible - the kernel checks the numeric
+                               capability bit, and CAP_* is the one
+                               spelling the kernel/libcap headers define for
+                               it), the same rationale as `ad_schema_attributes`
+                               applied to the kernel's own schema instead of
+                               AD's. Enumerated as the FULL closed set from
+                               capabilities(7) (39 names as of Linux 6.x),
+                               not a `CAP_\\w+` prefix match - a prefix match
+                               would also protect fabricated, non-existent
+                               "CAP_"-prefixed strings that carry no real
+                               kernel meaning, which is exactly the kind of
+                               example-shaped overreach this module's
+                               principle (derive from the external
+                               definition, not from what looks similar) is
+                               meant to avoid. Fixed as a known, disclosed
+                               gap (RESULTS.md / thesis reference doc, "atom-
+                               classification gap") found as a side effect of
+                               the AND/OR fix and deliberately left unpatched
+                               pending a fresh, held-out validation sample -
+                               that sample is the `posix_capabilities`-tagged
+                               fixture in `tests/test_protected_literals_posix_capabilities.py`,
+                               built fresh rather than replayed against
+                               whatever originally exposed the gap.
+                               DISCLOSED SCOPE LIMIT: matching requires the
+                               `cap_`/`CAP_` prefix (the setcap/getcap/capsh/
+                               auditd textual convention). Kubernetes and
+                               Docker security-context capability lists
+                               conventionally OMIT that prefix (`NET_ADMIN`,
+                               `SYS_ADMIN`), which is indistinguishable from
+                               an ordinary uppercase constant without
+                               additional schema context (a `securityContext.
+                               capabilities.add` field path) this module does
+                               not currently examine - left unmatched rather
+                               than risking exactly the false-positive class
+                               (unrelated uppercase literals) the fresh
+                               validation sample was built to check for.
 
 Cloud-provider audit action names (eventName/operationName/...) are NOT
 included as unconditionally protected - see `CLOUD_AUDIT_*` below, kept
@@ -119,6 +161,16 @@ class ProtectedValueCategory:
     name: str
     pattern: re.Pattern
     rationale: str
+    # False (default) preserves every existing category's behavior: the
+    # pattern is checked against the combined "field value" haystack, which
+    # is correct for path-fragment patterns (a registry path, a named pipe)
+    # where the protected token is unambiguous wherever it appears. True
+    # restricts the match to the VALUE alone - for a category like
+    # `posix_capabilities` where the protected thing is a specific literal
+    # value, not the concept of a field being named after one (a field
+    # literally named `cap_net_admin` used as an unrelated boolean flag must
+    # not be protected just because its name echoes a real capability).
+    value_only: bool = False
 
 
 PROTECTED_VALUE_CATEGORIES: list[ProtectedValueCategory] = [
@@ -222,6 +274,24 @@ PROTECTED_VALUE_CATEGORIES: list[ProtectedValueCategory] = [
         "assignment (ZoneMap) - distinct from windows_autorun_registry, "
         "which is deliberately scoped to autorun/persistence mechanisms only.",
     ),
+    ProtectedValueCategory(
+        "posix_capabilities",
+        re.compile(
+            r"\bcap_(chown|dac_override|dac_read_search|fowner|fsetid|kill|setgid|"
+            r"setuid|setpcap|linux_immutable|net_bind_service|net_broadcast|"
+            r"net_admin|net_raw|ipc_lock|ipc_owner|sys_module|sys_rawio|sys_chroot|"
+            r"sys_ptrace|sys_pacct|sys_admin|sys_boot|sys_nice|sys_resource|"
+            r"sys_time|sys_tty_config|mknod|lease|audit_write|audit_control|"
+            r"setfcap|mac_override|mac_admin|syslog|wake_alarm|block_suspend|"
+            r"audit_read|perfmon|bpf|checkpoint_restore)\b",
+            re.I,
+        ),
+        "The fixed, kernel-defined Linux capability names (capabilities(7)) - "
+        "an attacker cannot rename a capability and keep its kernel-enforced "
+        "effect, so the full closed set is treated as unconditionally "
+        "protected rather than a `CAP_` prefix guess.",
+        value_only=True,
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -304,7 +374,10 @@ def is_protected(field: str, value: object, cloud_context: bool) -> tuple[bool, 
         # Part 2c's hand-label re-validation (sigma `win_security_svcctl_
         # remote_service.yml`, elastic `credential_access_spn_attribute_
         # modified.toml`) - both were silently unreachable before this fix.
-        if cat.pattern.search(haystack) or (value_str and cat.pattern.search(value_str)):
+        if cat.value_only:
+            if value_str and cat.pattern.search(value_str):
+                return True, cat.name
+        elif cat.pattern.search(haystack) or (value_str and cat.pattern.search(value_str)):
             return True, cat.name
 
     if cloud_context and field_l in CLOUD_AUDIT_ACTION_FIELD_SUFFIXES:

@@ -295,6 +295,20 @@ def test_compute_triage_progress_cb_reports_detail_for_semantic_diff_and_classif
     # inside compute_triage if this ever regressed to fewer/more args.
 
 
+def test_compute_triage_surfaces_degraded_history_health(revised_repo: Path):
+    """`revised_repo` has exactly 2 total commits - below
+    DEGRADED_HISTORY_MIN_COMMITS. `triage` (not just plain `staleness`)
+    must surface that caveat too, since it's the primary command most
+    users run and its never-revised/staleness-band signals come from the
+    same thin history."""
+    report = priority.compute_triage(revised_repo, "sigma", subdir="rules")
+    assert report.history_health == "degraded"
+    assert "insufficient_total_commits" in report.history_health_reasons
+    d = report.to_dict()
+    assert d["history_health"] == "degraded"
+    assert "insufficient_total_commits" in d["history_health_reasons"]
+
+
 def test_compute_triage_progress_cb_raising_aborts_the_whole_computation(revised_repo: Path):
     """Same exception-propagation contract as compute_semantic_diff's own
     progress_cb (see test_semantic_diff.py) - this is what the GUI's Stop

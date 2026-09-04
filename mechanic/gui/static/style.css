@@ -9,9 +9,23 @@
    git history) still applies verbatim: worst adjacent pair clears the CVD
    floor (deutan ΔE 11.3, tritan ΔE 9.6) and lands at 13.6/15 on the strict
    normal-vision no-label floor, accepted because every instance is a
-   labelled badge, never a bare swatch. No gradients used to fake depth
-   without meaning - the ones here (buttons, the progress/energy bar,
-   panel edge-light) all read as directional state (pressed/hover, fill
+   labelled badge, never a bare swatch (verified again directly against
+   this file: priorityBadge()/buildChips() in app.js always render the
+   text label alongside the colour, no bare-swatch instance exists).
+
+   RE-CHECKED (mechanic hardening pass, Task 7): before accepting 13.6
+   again, an actual search was run rather than assumed unfixable - 332,173
+   candidate (--high, --medium) pairs across the orange/amber and yellow/
+   gold hue families, filtered to the dark-mode OKLCH lightness band
+   [0.48, 0.67] and the 0.10 chroma floor, scored by worst-pair normal-
+   vision ΔE. Best found: 13.9 (barely above 13.6), and it only reaches
+   that by giving up CVD separation (11.3 → the 6-8 "floor" band). The
+   current colours are already close to the practical ceiling for four
+   traffic-light-convention hues sharing this narrow lightness band on a
+   near-black surface - kept as a verified, evidence-backed decision, not
+   a re-accepted unexamined gap. No gradients used to fake depth without
+   meaning - the ones here (buttons, the progress/energy bar, panel
+   edge-light) all read as directional state (pressed/hover, fill
    progress, "lit" edge), same rule as before. */
 
 :root {
