@@ -23,17 +23,59 @@ small samples. Nothing else does this at repository scale.
 | Git-driven staleness engine | `mechanic/churn.py` |
 | Behavioral (semantic) diff | `mechanic/semantic_diff.py` |
 | Rule AST | `mechanic/ast_repr.py` |
-| Structural fragility classifier | `mechanic/fragility.py`, `mechanic/text_fragility.py`, `mechanic/structural_detectors.py`, `mechanic/protected_literals.py`, `mechanic/refdata.py`, `mechanic/splunk_macros.py`, `mechanic/legacy_v1.py` (ablation baseline only) |
+| Structural fragility classifier (Sigma-only) | `mechanic/fragility.py`, `mechanic/structural_detectors.py`, `mechanic/protected_literals.py`, `mechanic/refdata.py`, `mechanic/legacy_v1.py` (ablation baseline only) |
 | Review-priority triage | `mechanic/priority.py` |
 | CLI | `mechanic/cli.py` — `scan`, `staleness`, `ast`, `report`, `triage`, `explain` |
 
 **Validation status**: the fragility taxonomy is externally validated
 against MITRE Center for Threat-Informed Defense's Summiting the Pyramid
-(STP) — Kendall's tau-b 0.361, p = 0.0010 (`RESULTS.md`, "Part 2, external
-validation" and "The AND/OR fix"). Staleness reproduces a prior
-investigation's cited figures across five real repositories. This is the
-project's calibrated, trusted instrument — see Part 4 below for how these
-numbers are pinned against silent drift.
+(STP) — Kendall's tau-b 0.3117, p = 0.0052, on the Sigma-only subset of the
+72-row STP fixture (n=70; see "The staleness-vs-fragility scoping decision"
+below for why this is now the core's own number, and
+`docs/multiformat-experimental.md` for its relationship to the historical
+combined 0.361 figure). Staleness reproduces a prior investigation's cited
+figures across five real repositories, any format. This is the project's
+calibrated, trusted instrument — see Part 4 below for how these numbers are
+pinned against silent drift.
+
+## The staleness-vs-fragility scoping decision
+
+The core is **Sigma-only for fragility, tiering, and priority**
+(`mechanic scan`/`triage`/`explain`/`report`) but stays **format-agnostic
+for staleness** (`mechanic staleness`, and the staleness half of `report`).
+This split, not an all-or-nothing "core is Sigma-only" rule, is deliberate:
+
+- **Staleness is git history, and git history is real regardless of rule
+  format.** A commit either touched a file or it didn't; `churn.py`'s
+  mechanical-commit filtering and organic-commit math don't need to
+  understand the rule's query language at all. `semantic_diff.py`'s
+  behavioral staleness goes one step further (does the DETECTION LOGIC, not
+  just the file, look different) via a format-aware but still
+  parser-free YAML/TOML-key comparison for Elastic/Splunk, medium
+  confidence, already disclosed as such in RESULTS.md Part 1 (27.4% of
+  Elastic's rules, 36.8% of Splunk's, never behaviorally revised - the
+  project's own headline finding). None of this depends on the
+  quarantined multiformat package.
+- **Fragility/tiering/priority need a real parse tree to earn the core's
+  validation bar.** The STP-validated structural detectors and the
+  AND/OR combination correction (`AND -> MIN`, `OR -> MAX`) walk Sigma's
+  real AST - there is no equivalent for Elastic (EQL/KQL/ES|QL) or Splunk
+  (SPL) anywhere in this codebase, only a regex-based approximation
+  (`mechanic/experimental/multiformat/text_fragility.py`) capped at
+  "medium" confidence and explicitly caveated per rule. Shipping that as
+  core, alongside output that IS AST-validated, would present two
+  different confidence levels as one uniform product.
+
+Concretely: `mechanic scan`/`triage`/`explain`/`report` accept only
+`--fmt sigma` (enforced at the CLI's own argument-parsing level - see
+`mechanic/cli.py`'s `_SIGMA_ONLY_FMT_CHOICE`); `compute_triage` raises
+`priority.UnsupportedFormatError` with a clear message
+(`SIGMA_ONLY_FRAGILITY_MESSAGE`) if ever reached with anything else.
+`mechanic staleness` keeps the full format registry (`sigma`,
+`elastic_toml`, `splunk_yaml`, `yaml_generic`). See
+`docs/multiformat-experimental.md` for the quarantined Elastic/Splunk
+fragility work itself, and the GUI's Format selector (Sigma-only now) in
+`mechanic/gui/static/index.html`.
 
 ## The EXPERIMENT (quarantined)
 
@@ -66,31 +108,67 @@ PATH (or `$MECHANIC_RSIGMA_BIN`), network access, and — for repair
 *generation* specifically — a live `GROQ_API_KEY`. None of these are ever
 required to run `scan`, `staleness`, `triage`, or `explain`.
 
+**A second, separate quarantine**: Elastic (EQL/KQL/ES|QL)/Splunk (SPL)
+fragility classification — see `docs/multiformat-experimental.md` for the
+full writeup (what it is, exactly why it doesn't meet the core's
+STP-validated bar, and the concrete path back via a real KQL parser).
+Unlike the repair pipeline, this code was moved into its own subpackage
+(`mechanic/experimental/multiformat/`) rather than left flat in
+`mechanic/` — both are equally quarantined; the different layout is just
+because this one arrived later, after the package already existed as a
+pattern to follow.
+
+| Piece | Module(s) |
+|---|---|
+| Regex-based atom extraction + tier classification (EQL/KQL/SPL) | `mechanic/experimental/multiformat/text_fragility.py` |
+| Splunk CIM/macro resolution | `mechanic/experimental/multiformat/splunk_macros.py` |
+| Per-file fragility builders (`classify_elastic_file`/`classify_splunk_file`) | `mechanic/experimental/multiformat/multiformat_fragility.py` |
+| Triage composition (`compute_multiformat_triage`) | `mechanic/experimental/multiformat/triage.py` |
+
+No CLI/console-script for this one — see `triage.py`'s module docstring for
+why a polished CLI surface would itself misrepresent the quarantine. Call
+`compute_multiformat_triage` directly from Python instead.
+
 ## The enforcement, not just the claim
 
 A stated boundary that nothing checks is not a boundary. Three mechanisms
-enforce this one:
+enforce this one (both quarantines, the repair pipeline and multiformat
+fragility, are covered by the same three mechanisms below — `EXPERIMENT_MODULES`
+in `tests/test_core_isolation.py` lists both):
 
 1. **Import graph.** `mechanic/cli.py` (the core CLI) contains zero
    imports of `verify`, `gate`, `evasion`, `synthetic_benign`,
-   `llm_client`, `repair_generator`, or `repair_outcome` — not lazy
-   imports inside function bodies, no imports at all. The only CLI module
-   that imports `mechanic.verify` is `mechanic/cli_repair.py`, a separate
-   file registered as a separate console script (`mechanic-repair`), so
-   running `mechanic scan`/`staleness`/`triage`/`explain` never triggers
-   Python to even parse the experiment modules, let alone execute them.
-   Every core module (`loader`, `churn`, `discovery`, `categories`,
-   `semantic_diff`, `ast_repr`, `fragility`, `text_fragility`,
-   `structural_detectors`, `protected_literals`, `refdata`,
-   `splunk_macros`, `priority`, `legacy_v1`) is likewise clean — confirmed
-   by direct grep of every `import`/`from mechanic` line in each file, not
-   assumed.
-2. **Packaging.** `requests` (the only third-party dependency the
+   `llm_client`, `repair_generator`, `repair_outcome`, or anything under
+   `mechanic.experimental.multiformat` — not lazy imports inside function
+   bodies, no imports at all. The only CLI module that imports
+   `mechanic.verify` is `mechanic/cli_repair.py`, a separate file
+   registered as a separate console script (`mechanic-repair`); nothing
+   registers a console script for `mechanic.experimental.multiformat` at
+   all (see that package's own note on why). Running
+   `mechanic scan`/`staleness`/`triage`/`explain` never triggers Python to
+   even parse either experiment's modules, let alone execute them. Every
+   core module (`loader`, `churn`, `discovery`, `categories`,
+   `semantic_diff`, `ast_repr`, `fragility`, `structural_detectors`,
+   `protected_literals`, `refdata`, `priority`, `legacy_v1`) is likewise
+   clean — confirmed by direct grep of every `import`/`from mechanic` line
+   in each file, not assumed. `mechanic/priority.py` is the one core
+   module that used to import `text_fragility`/`splunk_macros` (for its
+   now-removed `_elastic_fragility`/`_splunk_fragility` functions, moved
+   unchanged to `mechanic/experimental/multiformat/multiformat_fragility.py`)
+   — it no longer does; `priority.build_triage_report` is the reusable
+   engine both the core's Sigma-only `compute_triage` and the quarantined
+   `compute_multiformat_triage` compose with their own fragility function,
+   and that direction (experiment importing core) is fine and expected.
+2. **Packaging.** `requests` (the only third-party dependency the repair
    experiment side needs beyond core's own list) lives in `pyproject.toml`
    under `[project.optional-dependencies] repair`, not the base
    `dependencies` list — a `pip install mechanic` with no extras cannot
    even reach `mechanic.llm_client` without a `ModuleNotFoundError`,
-   before any question of an API key arises.
+   before any question of an API key arises. The multiformat quarantine
+   needs no new third-party dependency beyond what the core already
+   requires (PyYAML, stdlib `tomllib`/`re`), so there is no equivalent
+   packaging gate for it — the import-graph and test enforcement below is
+   what does the work there.
 3. **A test that fails if the boundary is crossed.**
    `tests/test_core_isolation.py` spawns a fresh subprocess (not the
    already-warm test-runner process, which may have imported anything)
@@ -100,7 +178,12 @@ enforce this one:
    real fixture repo in a subprocess with `GROQ_API_KEY` unset and
    `MECHANIC_RSIGMA_BIN` unset, asserting each command completes with the
    expected exit code — proving the "zero dependency" claim behaviorally,
-   not just by import inspection.
+   not just by import inspection. The multiformat quarantine needs no
+   equivalent live-dependency test (it requires no external binary, network
+   access, or API key even to use directly) — the import-graph checks above
+   are the whole enforcement story for it, plus
+   `tests/test_cli.py::test_triage_and_explain_refuse_non_sigma_fmt_at_the_cli_level`
+   proving the CLI's own `--fmt` restriction behaviorally.
 
 ## What "quarantine" does and doesn't mean here
 

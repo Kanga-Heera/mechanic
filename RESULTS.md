@@ -1,5 +1,31 @@
 # Validation run: five real repositories
 
+> **A later scoping pass, read this first:** after everything below was
+> written, the CORE product's fragility/tiering/priority layer was scoped
+> to **Sigma-only** (`mechanic/experimental/multiformat/` now holds the
+> quarantined Elastic/Splunk text-path classification - see
+> `docs/core-vs-experiment.md` and `docs/multiformat-experimental.md`).
+> Staleness (Component 2, Part 1's behavioral diff) is UNAFFECTED - it was
+> already, and remains, format-agnostic; every Elastic/Splunk staleness
+> number below is a current, core result exactly as reported. What changed:
+> the STP external-validation figure most prominently cited below,
+> **tau-b = 0.361 (n=72)**, was not purely Sigma (70 SigmaHQ + 1 Elastic + 1
+> Splunk row) - re-derived Sigma-only from the same frozen fixture using
+> only core code, it is **tau-b = 0.3117 (p=0.0052), n=70** (see "The AND/OR
+> fix, implemented, and everything re-run" section for the full numbers).
+> The original 0.361 figure is not deleted or wrong - it is real, it
+> happened, and it is kept below in full - it is now labeled as the
+> historical, mixed-corpus figure, re-locked in
+> `tests/experimental/test_multiformat_validated_numbers_lock.py`, while
+> `tests/test_validated_numbers_lock.py::test_stp_rank_correlation_sigma_only_locked`
+> locks the new Sigma-only figure as the core's own. Likewise, every
+> per-corpus Elastic/Splunk fragility kappa/table below (the 90-rule
+> development-set breakdowns, the Sigma-only-vs-text-only ablation, the CIM
+> finding) is real, historical work that still fully stands **as a
+> characterization of the now-quarantined multiformat classifier** - not as
+> a claim about the validated core, which no longer includes that code path
+> at all.
+
 Every external dataset, corpus, or catalogue this project depends on
 (rule corpora, STP's own repo and ScoredAnalytics CSV, LOLBAS/GTFOBins/
 LOOBins/ATT&CK STIX, pySigma/PyDriller) is registered with its exact
@@ -1351,7 +1377,7 @@ Elastic/Splunk automatically.
 | | n | Kendall's tau-b | Spearman's rho |
 |---|---:|---:|---:|
 | Before either fix | 72 | 0.032 (p=0.767) | 0.035 (p=0.770) |
-| **After both fixes** | 72 | **0.361 (p=0.0010)** | **0.392 (p=0.0007)** |
+| **After both fixes (combined: 70 Sigma + 1 Elastic + 1 Splunk)** | 72 | **0.361 (p=0.0010)** | **0.392 (p=0.0007)** |
 
 This is the outcome the pre-registered interpretation called the strongest
 possible validation branch. A moderate, HIGHLY statistically significant
@@ -1362,6 +1388,33 @@ contingency table and disagreement list are in the Step 3 section above (now
 current); event-robustness correlation remains near-zero (tau=0.010,
 p=0.944, n=50) - unchanged, since mechanic still has no equivalent axis at
 all, as already disclosed.
+
+> **Sigma-only re-derivation, added by the later Sigma-only scoping pass
+> (see the note at the top of this document):** the 72-row sample above is
+> 70 SigmaHQ + 1 Elastic + 1 Splunk row - not purely Sigma. Once
+> fragility/tiering was scoped to Sigma-only in the core, the combined
+> figure above could no longer be reproduced by core code alone, so it was
+> not simply relabeled "the core's number" while secretly still depending
+> on the (now quarantined) text-path classifier for 2 of its 72 rows.
+> Instead, the SigmaHQ-only subset (n=70) was re-classified using *only*
+> `mechanic.fragility`/`mechanic.ast_repr`/`mechanic.loader`:
+>
+> | | n | Kendall's tau-b | Spearman's rho | Mapped quadratic-weighted kappa |
+> |---|---:|---:|---:|---:|
+> | Combined (the two rows above) | 72 | 0.3607 (p=0.0010) | 0.3917 (p=0.0007) | 0.316 |
+> | **Sigma-only (core's own figure, going forward)** | **70** | **0.3117 (p=0.0052)** | **0.3361 (p=0.0044)** | **0.2821** |
+>
+> Still a real, moderate, statistically significant positive correlation -
+> honestly lower than the combined figure (removing 2 of 72 rows should
+> move the number, and it does), not silently kept at the old value. Locked
+> by `tests/test_validated_numbers_lock.py::test_stp_rank_correlation_sigma_only_locked`
+> (core-only). The combined 0.361/0.392/0.316 figures above remain exactly
+> as reported - re-locked, unchanged, in
+> `tests/experimental/test_multiformat_validated_numbers_lock.py` - and
+> should now be read as characterizing the quarantined multiformat
+> classifier's contribution to the historical mixed-corpus result, not as
+> the core's own validation. See `docs/multiformat-experimental.md` for the
+> full writeup.
 
 ### Re-run 2: the 90-rule LLM development set - kappa dropped, and that itself is a finding
 

@@ -2,28 +2,53 @@
 
 Detection rule maintenance triage.
 
-**Status, plainly, no spin:** the CORE product — a fault-isolated Sigma/
-Elastic/Splunk rule loader, a git-driven behavioral staleness engine, and a
-structural fragility classifier externally validated against MITRE Center
-for Threat-Informed Defense's Summiting the Pyramid methodology (Kendall's
-tau-b = 0.361, p = 0.0010 against MITRE's own human-expert-scored analytics
-— see `RESULTS.md`) — is a finished, production-hardened rule-triage tool
-that fills a gap nothing else in the space fills: alert triage is a crowded
+**Status, plainly, no spin:** the CORE product is a **Sigma** detection-rule
+triage tool — a fault-isolated rule loader, a git-driven behavioral
+staleness engine (format-agnostic: also runs on Elastic/Splunk repos, see
+below), and a structural fragility classifier externally validated against
+MITRE Center for Threat-Informed Defense's Summiting the Pyramid
+methodology (Kendall's tau-b = 0.3117, p = 0.0052 against MITRE's own
+human-expert-scored analytics, Sigma-only — see `RESULTS.md` and
+`docs/multiformat-experimental.md`). This scope is a deliberate strength,
+not an apology: Sigma is the one format this project has a real AST for,
+so it's the only one where the STP-validated structural detectors and
+AND/OR combination logic actually run — the classifier is validated on
+exactly the format where that validation holds, and says so plainly rather
+than quietly extending the same confidence level to formats it hasn't
+earned it on.
+
+It fills a gap nothing else in the space fills: alert triage is a crowded
 field, but *rule* triage (telling an engineer which detection rules are
 fragile and/or stale and therefore need attention first, at repository
 scale) is not. It runs `scan`/`staleness`/`triage`/`explain` with zero
 dependency on RSigma, zero network access, and no API key, enforced by a
 test (`docs/core-vs-experiment.md`, `tests/test_core_isolation.py`) — see
-`QUICKSTART.md` for five real commands against a real SigmaHQ checkout. A
-separate, later Stage 3 experiment asked whether a fragile rule can be
-*repaired* automatically and verified by a real detection engine rather than
-an LLM's own say-so; that experiment is complete and its honestly-measured
-result (a 3.6% acceptance rate, 1 of 28 sampled rules, independence-audited
-— see `RESULTS.md`'s Stage 3 Phase 3 section) is a real finding worth
-keeping, but it is **not** part of the core product, is not required for
-anything above, and is quarantined into its own module tree and its own
-`mechanic-repair` CLI so its presence, correctness, or failure can never
-affect the core's reliability.
+`QUICKSTART.md` for five real commands against a real SigmaHQ checkout.
+
+Two things are explicit, honest future work rather than gaps quietly left
+unaddressed:
+
+- **Elastic/Splunk structural fragility** — a regex-approximated,
+  medium-confidence classification exists and is kept, working, and
+  tested, but quarantined out of the core into
+  `mechanic/experimental/multiformat/` because it cannot clear the same
+  AST-validated bar Sigma's classifier does — see
+  `docs/multiformat-experimental.md` for exactly what's there and why. The
+  concrete path back to core status: a real KQL parser
+  ([kibana-ql](https://github.com/elastic/kibana), used by Kibana itself)
+  would let Elastic's structural detectors and AND/OR combination run for
+  real and be re-validated against STP on its own merits. EQL and SPL are
+  harder — no equivalently mature, permissively-licensed Python parser
+  identified as of this writing — and stay unparsed for now.
+- **Rule repair** — a separate, later Stage 3 experiment asked whether a
+  fragile rule can be *repaired* automatically and verified by a real
+  detection engine rather than an LLM's own say-so; that experiment is
+  complete and its honestly-measured result (a 3.6% acceptance rate, 1 of
+  28 sampled rules, independence-audited — see `RESULTS.md`'s Stage 3
+  Phase 3 section) is a real finding worth keeping, but it is **not** part
+  of the core product and is quarantined into its own module tree and its
+  own `mechanic-repair` CLI so its presence, correctness, or failure can
+  never affect the core's reliability.
 
 This project was originally scoped and built in three stages; the sections
 below still describe Stage 1's infrastructure (loader, staleness, AST) in
@@ -34,14 +59,15 @@ judge ATT&CK coverage or claim to catch every possible evasion — see
 here.
 
 **Mechanic measures:**
-- staleness (git-driven organic-revision behavior — `churn.py`/`semantic_diff.py`)
-- structural fragility (`fragility.py`/`structural_detectors.py`, STP-validated for Sigma)
+- staleness (git-driven organic-revision behavior — `churn.py`/`semantic_diff.py`; format-agnostic, any of the four registered rule formats)
+- structural fragility, **Sigma-only in the core** (`fragility.py`/`structural_detectors.py`, STP-validated) — Elastic/Splunk's medium-confidence approximation lives in the quarantined `mechanic/experimental/multiformat/` (see `docs/multiformat-experimental.md`), never blended into core output
 - a review-priority ORDERING derived from those two axes (`priority.py`) — never a fused/weighted score (see Part 3 in `RESULTS.md`)
 
 **Mechanic does NOT measure:**
 - event robustness (MITRE STP's separate analytic-robustness axis — mechanic's apparent weak correlation with it is coincidental field overlap, not a real second dimension; see RESULTS.md's Task 7 correlation experiment). Not on the roadmap for this stage — stated as a genuine scope boundary, not a gap accidentally left unfilled.
 - ATT&CK technique-proximity/coverage
 - evadability against a specific, real adversary (a manual/academic exercise, not what repository-scale triage can claim)
+- validated Elastic/Splunk fragility — the core refuses to score these formats at all (`mechanic triage --fmt elastic_toml` errors cleanly rather than producing a tier); see `docs/multiformat-experimental.md` for the quarantined, lower-confidence work that exists outside the core
 
 ## Why this exists
 
@@ -229,8 +255,15 @@ staleness, e.g. SigmaHQ's `rules/` while excluding `rules-emerging-threats/`
 etc. — the git root stays at the repo root pydriller needs).
 
 Rule-file discovery (`mechanic/discovery.py`) is format-agnostic and
-pluggable — staleness works on any rule-file repo (Elastic's TOML, Splunk's
-YAML), not just Sigma; only `scan` and `ast` require actual Sigma YAML.
+pluggable — **`staleness`** works on any rule-file repo (Elastic's TOML,
+Splunk's YAML), not just Sigma. `scan`/`ast`/`triage`/`explain`/`report`
+are **Sigma-only**: `scan`/`ast` because Sigma is the only format this
+codebase has a real parser for; `triage`/`explain`/`report` because
+fragility/tiering/priority need that same real parser to earn their
+external-validation bar — see `docs/core-vs-experiment.md`, "The
+staleness-vs-fragility scoping decision", and
+`docs/multiformat-experimental.md` for the quarantined Elastic/Splunk
+fragility work this excludes.
 
 ### 5. Priority / triage (`mechanic/priority.py`, Stage 3 / Part 3)
 
@@ -265,11 +298,16 @@ What `triage` actually does:
   as a tie-break — explicitly labelled in the CLI output as not a validated
   score.
 - Reports every rule's fragility **confidence**, propagated from Part 2:
-  `high` for Sigma's AST path (AND/OR-corrected against STP), `medium` for
-  Elastic/Splunk's text-only path — visible on every row and in `--json`,
-  not just in this document, per the same source rules always carrying the
-  caveat that their tier is computed WITHOUT the AND/OR correction (no
-  parse tree to walk).
+  `high` for every rule `triage`/`explain` score, since the core is
+  Sigma-only and every tier comes from Sigma's AST path (AND/OR-corrected
+  against STP). A `medium`-confidence, `caveat`-carrying tier is possible in
+  the `FragilitySignal`/`RuleSignals` shape itself (`caveat`/
+  `and_or_corrected`/`lower_confidence` fields, rendered by
+  `RuleSignals.narrative` whenever present) — it's just never produced by
+  the core anymore, only by the quarantined
+  `mechanic.experimental.multiformat.triage.compute_multiformat_triage`
+  (see `docs/multiformat-experimental.md`), which reuses this exact same
+  rendering.
 - Puts every unscoreable rule in its own section (`unscoreable` in
   `--json`), each with the specific reason (`UNSCOREABLE` structural
   detector, insufficient information, failed to parse, no query/search
@@ -289,9 +327,11 @@ a table of field names and values first: a few sentences on what the
 staleness and fragility facts actually mean for this rule, ending with
 "review this," followed by the full field/value/atom/structural-detector
 detail underneath for anyone who wants to verify the narrative against the
-raw data. For a text-path (Elastic/Splunk) rule, the AND/OR-correction
-caveat is one of those sentences, not a footnote - it renders in the
-narrative itself. Per-node AST path breadcrumbs are not tracked by the
+raw data. (For a text-path rule from the quarantined multiformat
+experiment, the AND/OR-correction caveat is one of those sentences, not a
+footnote - it renders in the narrative itself; the core's own `explain`
+output never has one, since it's Sigma-only.) Per-node AST path breadcrumbs
+are not tracked by the
 classifier (`mechanic/fragility.py` records field/value/tier/reason per
 atom, not a path into the tree) - `explain` reports the full reasoning
 trail that actually exists rather than fabricating path detail that
@@ -438,7 +478,7 @@ Each entry in `rules`/`unscoreable` (also the shape `explain --json` returns for
     "tier": "IOC|Artifact|Tool|TTP|null", "confidence": "high|medium|low",
     "and_or_corrected": true, "unscoreable": false, "unscoreable_reason": null,
     "structural_findings": [], "structural_detail": {}, "atoms": [{"field": "...", "value": "...", "tier": "...", "reason": "..."}],
-    "caveat": null  // non-null ONLY for the text-only (Elastic/Splunk) path - always check this before trusting a tier at face value
+    "caveat": null  // ALWAYS null from the core (Sigma-only, AST path); non-null only from the quarantined multiformat experiment - always check this before trusting a tier at face value
   },
   "is_fragile": false,       // tier in {IOC, Artifact, Tool}
   "needs_attention": false,  // is_fragile AND staleness.is_stale
@@ -446,7 +486,7 @@ Each entry in `rules`/`unscoreable` (also the shape `explain --json` returns for
     "label": "CRITICAL|HIGH|MEDIUM|LOW|null",  // null exactly when uncertain=true - never a guessed label
     "tier": "IOC|Artifact|Tool|TTP|null",       // axis 1 - ALWAYS present alongside label, never a bare label
     "staleness_band": "stale_over_2yr|aging_6mo_to_2yr|fresh_under_6mo|null",  // axis 2
-    "lower_confidence": false,   // true for text-path (Elastic/Splunk) tiers - same signal as fragility.caveat
+    "lower_confidence": false,   // always false from the core (Sigma-only); same signal as fragility.caveat
     "uncertain": false,          // true if label is null (unscoreable rule, or unresolvable staleness band)
     "uncertainty_reason": null   // stated reason whenever uncertain=true
   },
@@ -454,7 +494,7 @@ Each entry in `rules`/`unscoreable` (also the shape `explain --json` returns for
 }
 ```
 
-**The `fragility.caveat` field is the machine-readable form of the text-path confidence warning** - any consumer building automation on top of `--json` output must check it before treating a `tier` as high-confidence; it is non-null precisely (and only) when the tier came from the Elastic/Splunk text-only path rather than a Sigma AST walk.
+**The `fragility.caveat` field is the machine-readable form of the text-path confidence warning** - any consumer building automation on top of `--json` output must check it before treating a `tier` as high-confidence; it is non-null precisely (and only) when the tier came from a text-only path rather than a Sigma AST walk. The core's own `--json` output never sets it (fragility/tiering/priority are Sigma-only there - see `docs/core-vs-experiment.md`); it exists in the shape at all because the quarantined `mechanic.experimental.multiformat` package reuses this exact same `RuleSignals`/`FragilitySignal` rendering for its own, lower-confidence Elastic/Splunk tiers (see `docs/multiformat-experimental.md`).
 
 **Priority is a lookup, never a fused score** - `priority.label` is always paired with `priority.tier` and `priority.staleness_band`, the exact two axes that produced it (`mechanic/priority.py::PRIORITY_MATRIX`); no consumer should display `label` without them. `mechanic priority-legend --json` returns the matrix itself (also embedded as `priority_matrix` in every `triage --json` response):
 
