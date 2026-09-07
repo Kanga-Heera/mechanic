@@ -102,6 +102,14 @@ from mechanic import ast_repr, protected_literals, refdata, structural_detectors
 
 AstNode = dict[str, Any]
 
+# These four tiers are an independently-arrived-at approximation of MITRE's
+# Summiting the Pyramid (STP) v4.0 five-level Analytic Robustness model, not
+# an original taxonomy - IOC/Artifact both correspond to STP's Level 1
+# (Ephemeral Values); Tool collapses STP's Level 2 (Adversary-Brought Tool)
+# and Level 3 (Pre-Existing Tools); TTP collapses STP's Level 4 (Some
+# Implementations) and Level 5 (Full Technique). Every level quoted, cited,
+# and mapped in detail, including why each collapse is a deliberate
+# simplification rather than an oversight: docs/stp-alignment.md.
 TIER_RANK = {"IOC": 0, "Artifact": 1, "Tool": 2, "TTP": 3}
 RANK_TO_TIER = {v: k for k, v in TIER_RANK.items()}
 

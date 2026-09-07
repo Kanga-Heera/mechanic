@@ -48,6 +48,41 @@ from mechanic.discovery import discover_files
 TIER_RANK = fragility.TIER_RANK  # IOC=0, Artifact=1, Tool=2, TTP=3
 FRAGILE_TIERS = {"IOC", "Artifact", "Tool"}  # matches Task 7's own 2x2 collapse (non-fragile = TTP alone)
 
+# Grounds each tier's narrative explanation in MITRE's Summiting the
+# Pyramid (STP) v4.0 level definitions, quoted and cited in full in
+# docs/stp-alignment.md - mechanic's tiers are an independently-arrived-at
+# APPROXIMATION of STP's published, industry-adopted taxonomy, not an
+# original one (RESULTS.md, "Step 4 - repositioning the contribution").
+# This constant only changes what a reader is TOLD a tier means; it does
+# not change TIER_RANK, PRIORITY_MATRIX, or any classification logic - see
+# docs/stp-alignment.md Part 5 for the full grounding and why Tool and TTP
+# each collapse two STP levels into one mechanic tier.
+_STP_TIER_GROUNDING = {
+    "IOC": (
+        "This corresponds to Summiting the Pyramid (STP) v4.0's Level 1, \"Ephemeral Values\" - "
+        "observables STP itself describes as \"trivial for an adversary to change, or that change "
+        "even without adversary intervention\" (see docs/stp-alignment.md)."
+    ),
+    "Artifact": (
+        "STP v4.0 does not separate this from IOC - both are its Level 1, \"Ephemeral Values\" (STP's "
+        "own Level 1 examples include bare filenames and domain names, not just hashes/IPs); mechanic "
+        "draws a finer line inside that one STP level than STP itself does (see docs/stp-alignment.md)."
+    ),
+    "Tool": (
+        "STP v4.0 splits this into two levels mechanic's single Tool tier does not distinguish: Level 2, "
+        "\"Core to Adversary-Brought Tool\" (a tool the adversary brought in) and Level 3, \"Core to "
+        "Pre-Existing Tools\" (a tool already on the system) - a provenance judgment mechanic's "
+        "field/value classifier cannot make on its own. This collapse is a deliberate, disclosed "
+        "simplification, not an oversight - see docs/stp-alignment.md for which real rules land on "
+        "which side of that split and why."
+    ),
+    "TTP": (
+        "STP v4.0 similarly splits this into Level 4, \"Core to Some Implementations of (Sub-)Technique\" "
+        "and Level 5, \"Core to Sub-Technique or Technique\" (invariant across every implementation) - "
+        "mechanic's single TTP tier does not distinguish these either. See docs/stp-alignment.md."
+    ),
+}
+
 # Fragility/tiering/priority are SIGMA-ONLY in the core - see
 # docs/core-vs-experiment.md and docs/multiformat-experimental.md for the
 # scoping decision and why. Staleness (churn.py/semantic_diff.py) stays
@@ -210,6 +245,8 @@ class RuleSignals:
             "itself - the most durable kind of match mechanic recognizes",
         }.get(f.tier, f.tier or "unknown")
         sentences.append(f"Its fragility tier is {f.tier}: it matches on {tier_meaning}.")
+        if f.tier in _STP_TIER_GROUNDING:
+            sentences.append(_STP_TIER_GROUNDING[f.tier])
 
         if f.confidence == "high":
             sentences.append(
