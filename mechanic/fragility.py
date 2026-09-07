@@ -42,6 +42,37 @@ see RESULTS.md's STP validation section for the full investigation. Fixed
 via `_combine_ast_tier`, which walks the AST directly instead of flattening
 to a leaf list first.
 
+A SEVENTH cause, found by a single hand-test of one real rule after all six
+above had already shipped and been re-validated: `is_tool_value` decided an
+atom's Tool tier from the matched STRING alone (a catalog hit, or the
+`_CMDLET_RE`/`_EXE_RE` shape patterns), with no notion that the FIELD the
+match occurs in can itself invert what a tool-shaped string means. A known
+value in a binary-identity field (`Image`, `OriginalFileName`) is durable -
+renaming the running binary is the only evasion, which is exactly the
+FIELD_MISMATCH detector's canonical case above. The SAME shape of match in
+an attacker-authored free-text field is NOT durable: the attacker writes
+that text and can reword/obfuscate it indefinitely while keeping the
+underlying behaviour, so a cmdlet-shaped substring there says nothing about
+which tool ran, only about what the attacker happened to type. `ScriptBlockText`
+(Sigma `logsource.category: ps_script`, Windows PowerShell Script Block
+Logging, Event ID 4104) is the clean, unambiguous case: it is the verbatim,
+un-resolved source text of the script as written, so `ScriptBlockText|
+contains: 'Invoke-WebRequest'` is defeated by writing `iwr` instead - no
+tool switch required, just a one-character alias. The existing field-context
+logic (`_PROCESS_CONTEXT_FIELD_NAMES`, the Task 8 fix that stopped Splunk
+over-scoring) only ever asked "is this a process/image/commandline identity
+field" vs. "unrelated" - it had no third category for "this field is raw
+text the attacker authored." Fixed via `_SCRIPT_CONTENT_FIELD_NAMES` /
+`field_carries_script_content`, which gates OFF both of `is_tool_value`'s
+signal paths (catalog lookup AND the two pattern regexes) for that field,
+and a dedicated `classify_atom` branch that gives the resulting Artifact-tier
+atom its own explanation rather than the generic literal-string default - see
+the comment on `_SCRIPT_CONTENT_FIELD_NAMES` below for exactly which other
+candidate fields (CommandLine, ps_module's Payload/ContextInfo, ps_classic's
+Data) were considered and deliberately left out, and why. See RESULTS.md,
+"Bug fix: script-content field durability inversion" for the full
+investigation, including the STP re-validation this fix moved.
+
 ORDER OF OPERATIONS per rule:
   1. UNSCOREABLE?            -> own bucket, no tier assigned.
   2. Any structural detector
@@ -184,8 +215,102 @@ def field_carries_process_context(field: Optional[str]) -> bool:
     return _normalize_field_last_segment(field) in _PROCESS_CONTEXT_FIELD_NAMES
 
 
+# ATTACKER-AUTHORED SCRIPT CONTENT is a different axis from process context
+# above, and inverts the same tool-vocabulary signal instead of just gating
+# it on/off: a cmdlet/tool-shaped substring in one of these fields is text
+# the attacker wrote, not evidence of which tool ran, so it must NOT earn
+# Tool tier the way the identical string would in a binary-identity field.
+#
+# `scriptblocktext` is the field this was found against, and the only one
+# included here with full confidence:
+#
+#   - Sigma `logsource.category: ps_script` (Windows PowerShell Script
+#     Block Logging, Event ID 4104) logs the VERBATIM, un-resolved source
+#     text of the script as written - Microsoft's own documentation for
+#     this feature describes it as capturing script blocks "as they are
+#     executed", not a normalized/alias-resolved record. `Invoke-WebRequest`
+#     appearing in ScriptBlockText is defeated by writing `iwr` (a built-in
+#     alias) instead - no tool switch, a one-character rename.
+#   - Checked empirically against two real, independently-sourced rule
+#     corpora (hayabusa-rules' vendored SigmaHQ mirror + its own builtin
+#     set, ~5,000 rules total, at the time this was written): every single
+#     rule using a field literally named `ScriptBlockText` (186/186) has
+#     `logsource.category: ps_script` - this field name carries no
+#     collision risk with an unrelated meaning in real-world rules.
+#
+# Candidate fields considered and deliberately NOT included here - each is
+# a disclosed scope decision, not an oversight:
+#
+#   - `CommandLine`/`ParentCommandLine`/`ProcessCommandLine`: genuinely
+#     mixed - argv[0] (a real binary path/identity, already reached via
+#     `field_carries_process_context`'s catalog-lookup branch, validated by
+#     the FIELD_MISMATCH canonical case this fix must not regress) sits in
+#     the same string as attacker-authored arguments. This module has no
+#     argv parser to split the two apart, and guessing which portion a
+#     `|contains` match landed in would be exactly the kind of unprincipled,
+#     per-rule guess Part 2's design brief warned against - left as a
+#     disclosed gap for future work with real argv-aware parsing, not
+#     silently swept into this fix.
+#   - `Payload`/`ContextInfo` (Sigma `logsource.category: ps_module`,
+#     PowerShell Module Logging, Event ID 4103): superficially the same
+#     shape as ScriptBlockText, but PowerShell's module-logging pipeline
+#     resolves an invoked cmdlet's ALIAS to its real name before logging
+#     it (`CommandInvocation(Get-WmiObject)` is what gets written even if
+#     the attacker typed `gwmi`) - a cmdlet-name substring match here is
+#     NOT trivially defeated by the same alias-rename trick that breaks a
+#     ScriptBlockText match, so treating it identically would be a guess
+#     dressed up as the same fix, not the same fix. Left untouched pending
+#     its own dedicated investigation of what module logging actually
+#     resolves and what it doesn't (e.g. raw .NET method calls bypass
+#     module logging's ParameterBinding entirely, a real but different
+#     evasion this module does not currently reason about).
+#   - `Data` (Sigma `logsource.category: ps_classic`/`ps_classic_start`,
+#     classic PowerShell transcript/host-start logging, Event ID 400/800):
+#     the same free-text-content argument applies in principle, but unlike
+#     ScriptBlockText the bare field name `Data` is NOT unambiguous - the
+#     same empirical corpus check above found 18 real rules using a field
+#     named `Data` under `service: application` (unrelated Windows
+#     Application-log events) and 2 more under `service:
+#     msexchange-management`, neither of which carries attacker-authored
+#     script content. Gating on `Data` by name alone would misclassify
+#     those. Doing this correctly needs the field-name check to also see
+#     the rule's logsource category, which classify_atom does not have
+#     threaded through today - left as a disclosed, uncovered gap rather
+#     than guessed at.
+_SCRIPT_CONTENT_FIELD_NAMES = {"scriptblocktext"}
+
+
+def field_carries_script_content(field: Optional[str]) -> bool:
+    return _normalize_field_last_segment(field) in _SCRIPT_CONTENT_FIELD_NAMES
+
+
+def _tool_shaped_ignoring_field_context(value: Any) -> bool:
+    """The raw tool-vocabulary signal (catalog OR pattern match), with
+    every field-context gate removed. NEVER used to assign a tier -
+    `is_tool_value` (which applies the gates) is the only function that
+    does that. Used only so a script-content-field atom that got forced to
+    Artifact still gets told apart, in its `reason`, from an atom that was
+    never going to be tool-shaped in the first place - see `classify_atom`."""
+    if not isinstance(value, str) or not value:
+        return False
+    if _CMDLET_RE.search(value):
+        return True
+    if _EXE_RE.search(value):
+        return True
+    return refdata.is_known_tool_name(_basename(value))
+
+
 def is_tool_value(value: Any, field: Optional[str] = None) -> bool:
     if not isinstance(value, str) or not value:
+        return False
+    if field_carries_script_content(field):
+        # Attacker-authored script text (see _SCRIPT_CONTENT_FIELD_NAMES
+        # above) - neither signal path below is trustworthy here: a
+        # catalog/pattern hit says the attacker's script TEXT happens to
+        # mention a tool-shaped string, not that a specific tool ran.
+        # Falls through to classify_atom's Artifact default (with its own,
+        # specific explanation - see the
+        # attacker_authored_script_content_field branch there).
         return False
     if field_carries_process_context(field):
         basename = _basename(value)
@@ -197,8 +322,12 @@ def is_tool_value(value: Any, field: Optional[str] = None) -> bool:
     # CMDLET_RE/EXE_RE are pattern-shaped matches (a value that itself LOOKS
     # like "Invoke-Something" or "foo.exe"), not a word-list lookup against
     # thousands of catalog entries - the field-context ambiguity that
-    # motivates gating the catalog lookup doesn't apply to these, so they
-    # stay unconditional regardless of which field carries the value.
+    # motivates gating the catalog lookup doesn't apply to these THE SAME
+    # WAY (an ordinary word colliding with a catalog entry), so they stay
+    # unconditional with respect to THAT concern - but they are still
+    # subject to the script-content gate above, which is a different axis
+    # entirely (not "does this word collide with the catalog", but "did the
+    # attacker author this text").
     if _CMDLET_RE.search(value):
         return True
     if _EXE_RE.search(value):
@@ -249,6 +378,13 @@ def classify_atom(field_name: Optional[str], value: Any, cloud_context: bool) ->
         return AtomClassification(field_name, value, "Artifact", "eventid_or_syscall_field")
     if is_raw_ioc(value):
         return AtomClassification(field_name, value, "IOC", "raw_ioc_pattern")
+    if field_carries_script_content(field_name) and _tool_shaped_ignoring_field_context(value):
+        # Would have scored Tool by string shape alone - forced to Artifact
+        # because the field is attacker-authored script content (see
+        # _SCRIPT_CONTENT_FIELD_NAMES), with a reason distinct from the
+        # generic literal default so callers (priority.py's narrative) can
+        # explain WHY, not just report the demoted tier.
+        return AtomClassification(field_name, value, "Artifact", "attacker_authored_script_content_field")
     if is_tool_value(value, field_name):
         return AtomClassification(field_name, value, "Tool", "known_tool_name_or_cmdlet_or_exe_pattern")
     return AtomClassification(field_name, value, "Artifact", "literal_string_or_path_default")

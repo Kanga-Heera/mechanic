@@ -266,6 +266,27 @@ class RuleSignals:
                 parts.append(label)
             sentences.append(f"{verb}: {'; '.join(parts)}.")
 
+            # A match forced to Artifact because it's inside an
+            # attacker-authored script-content field (see
+            # fragility._SCRIPT_CONTENT_FIELD_NAMES) deserves its own
+            # sentence - the generic Artifact tier_meaning above ("a
+            # generic literal... an attacker can typically evade it with a
+            # small, cosmetic change") is true but doesn't say WHY a
+            # cmdlet/tool-shaped string here isn't Tool-tier, which is the
+            # thing worth explaining to a reader who'd otherwise expect
+            # `Invoke-WebRequest` to look like a Tool match.
+            script_content_atoms = [
+                a for a in shown if a.get("reason") == "attacker_authored_script_content_field"
+            ]
+            if script_content_atoms:
+                fields = ", ".join(sorted({a.get("field") for a in script_content_atoms}))
+                sentences.append(
+                    f"The {fields} field holds attacker-authored script text, not a record of which tool "
+                    f"ran - matching a tool or cmdlet name inside it doesn't require an attacker to actually "
+                    f"switch tools, only to reword or obfuscate the script (an alias, string concatenation, "
+                    f"reflection), which is easy to do."
+                )
+
         if self.triage_hypotheses:
             labels = ", ".join(self.triage_hypotheses)
             sentences.append(
