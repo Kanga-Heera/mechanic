@@ -244,6 +244,115 @@ def test_narrative_omits_and_or_caveat_for_sigma_ast_path(repo_with_history: Pat
         assert "does NOT use" not in r.narrative
 
 
+def test_narrative_explains_script_content_demotion_not_switch_tools():
+    """The bug's own explanation-text requirement: a script-content match
+    must be explained as attacker-authored text that's easy to reword, not
+    with the generic "switch tools" Tool-tier sentence, which is inverted
+    for this case."""
+    frag = priority.FragilitySignal(
+        tier="Artifact",
+        confidence="high",
+        and_or_corrected=True,
+        unscoreable=False,
+        unscoreable_reason=None,
+        structural_findings=[],
+        structural_detail={},
+        atoms=[
+            {
+                "field": "ScriptBlockText",
+                "value": "Invoke-WebRequest",
+                "tier": "Artifact",
+                "reason": "attacker_authored_script_content_field",
+            }
+        ],
+        caveat=None,
+    )
+    sig = priority.RuleSignals(
+        file="rules/ps_script_example.yml",
+        behavioral_commit_count=0,
+        never_revised=True,
+        days_since_behavioral_change=None,
+        age_days=900,
+        staleness_classification_confidence=None,
+        fragility=frag,
+        triage_hypotheses=[],
+    )
+    narrative = sig.narrative
+    assert "attacker-authored script text" in narrative
+    assert "ScriptBlockText" in narrative
+    # The OLD, inverted Tool-tier claim ("evading it requires an attacker
+    # to actually switch tools") must not appear - the new sentence does
+    # mention "switch tools", but only to say the opposite is true (an
+    # attacker does NOT need to switch tools to evade this match).
+    assert "evading it requires an attacker to actually switch" not in narrative
+    assert "doesn't require an attacker to actually switch tools" in narrative
+
+
+def test_narrative_omits_script_content_sentence_for_ordinary_tool_match():
+    """Negative check: a genuine binary-identity Tool match (Image, not a
+    script-content field) must NOT pick up the new sentence - it's specific
+    to the attacker_authored_script_content_field reason, not shown for
+    every Tool/Artifact rule."""
+    frag = priority.FragilitySignal(
+        tier="Tool",
+        confidence="high",
+        and_or_corrected=True,
+        unscoreable=False,
+        unscoreable_reason=None,
+        structural_findings=[],
+        structural_detail={},
+        atoms=[
+            {
+                "field": "Image",
+                "value": "mimikatz.exe",
+                "tier": "Tool",
+                "reason": "known_tool_name_or_cmdlet_or_exe_pattern",
+            }
+        ],
+        caveat=None,
+    )
+    sig = priority.RuleSignals(
+        file="rules/tool_example.yml",
+        behavioral_commit_count=0,
+        never_revised=True,
+        days_since_behavioral_change=None,
+        age_days=900,
+        staleness_classification_confidence=None,
+        fragility=frag,
+        triage_hypotheses=[],
+    )
+    narrative = sig.narrative
+    assert "attacker-authored script text" not in narrative
+    assert "switch tools" in narrative  # the generic Tool sentence is still correct here
+
+
+def test_sigma_fragility_end_to_end_script_content_rule_not_tool(tmp_path: Path):
+    """End-to-end regression check for the exact hand-tested rule shape,
+    through priority._sigma_fragility (the real entry point CLI/GUI use),
+    not just fragility.classify_rule directly."""
+    rule_path = tmp_path / "ps_download_cradle.yml"
+    rule_path.write_text(
+        "title: Test PowerShell Download Cradle\n"
+        "id: 4b1a6b0a-1b1a-4b1a-9b1a-1b1a4b1a6b0a\n"
+        "status: test\n"
+        "logsource:\n"
+        "    category: ps_script\n"
+        "    product: windows\n"
+        "detection:\n"
+        "    selection:\n"
+        "        ScriptBlockText|contains:\n"
+        "            - 'Invoke-WebRequest'\n"
+        "            - 'Net.WebClient'\n"
+        "            - 'DownloadString'\n"
+        "            - 'DownloadFile'\n"
+        "    condition: selection\n"
+        "level: high\n"
+    )
+    frag = priority._sigma_fragility(rule_path)
+    assert frag.tier == "Artifact"
+    assert frag.tier != "Tool"
+
+
 def test_deprecated_pipe_syntax_is_unscoreable_not_a_crash(tmp_path: Path):
     """Regression test for a real crash hit running triage against the full
     SigmaHQ corpus: a rule using the deprecated `condition: selection |

@@ -388,3 +388,157 @@ def test_raw_hash_scores_ioc_tier():
     tree = ast_repr.build_ast(rule)
     result = fragility.classify_rule(tree)
     assert result.tier == "IOC"
+
+
+# ---------------------------------------------------------------------------
+# Script-content field durability inversion (found via hand-test of a real
+# ps_script rule) - RESULTS.md "Bug fix: script-content field durability
+# inversion". Positive fixtures: several different script-content rules that
+# must now tier Artifact/low, not Tool. Negative fixtures: binary-identity
+# rules (including the load-bearing canonical FIELD_MISMATCH case above)
+# that must NOT regress - proving this is a field-context fix, not a
+# blanket demotion of every tool-vocabulary match everywhere.
+# ---------------------------------------------------------------------------
+
+_PS_SCRIPT_LOGSOURCE = {"category": "ps_script", "product": "windows"}
+
+
+def test_script_content_field_demotes_cmdlet_shaped_match():
+    """The hand-tested bug: ScriptBlockText|contains: 'Invoke-WebRequest'
+    used to score Tool via the unconditional _CMDLET_RE pattern match. It
+    is attacker-authored script source text - `iwr` (a built-in alias)
+    defeats the match without switching tools - so it must not earn Tool
+    tier."""
+    rule = _rule(
+        {"selection": {"ScriptBlockText|contains": "Invoke-WebRequest"}, "condition": "selection"},
+        logsource=_PS_SCRIPT_LOGSOURCE,
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier != "Tool"
+    atom = result.atoms[0]
+    assert atom.reason == "attacker_authored_script_content_field"
+
+
+def test_script_content_field_demotes_exe_shaped_match():
+    """Same mechanism via the _EXE_RE pattern (a `foo.exe`-shaped string)
+    instead of _CMDLET_RE - a download cradle referencing certutil.exe
+    inside a script block is still just script text the attacker can
+    reword (`cert`+`util.exe`, an environment variable, ...)."""
+    rule = _rule(
+        {"selection": {"ScriptBlockText|contains": "certutil.exe -urlcache"}, "condition": "selection"},
+        logsource=_PS_SCRIPT_LOGSOURCE,
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier != "Tool"
+
+
+def test_script_content_field_multi_atom_rule_from_the_hand_test():
+    """The exact rule shape that surfaced this bug: several tool-vocabulary
+    hits OR-linked in one ScriptBlockText|contains list. Proves the fix
+    generalizes across atoms within one rule, not just a single-value
+    fixture."""
+    rule = _rule(
+        {
+            "selection": {
+                "ScriptBlockText|contains": [
+                    "Invoke-WebRequest",
+                    "Net.WebClient",
+                    "DownloadString",
+                    "DownloadFile",
+                ]
+            },
+            "condition": "selection",
+        },
+        logsource=_PS_SCRIPT_LOGSOURCE,
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "Artifact"
+
+
+def test_script_content_field_ordinary_literal_keeps_default_reason():
+    """An atom in ScriptBlockText that was NEVER tool-vocabulary-shaped
+    (doesn't match the catalog or either pattern) must still get the
+    ordinary literal_string_or_path_default reason, not the script-content
+    one - the new reason is specifically for atoms that WOULD have scored
+    Tool, not a blanket relabel of every ScriptBlockText atom."""
+    rule = _rule(
+        {"selection": {"ScriptBlockText|contains": "totally ordinary sentence"}, "condition": "selection"},
+        logsource=_PS_SCRIPT_LOGSOURCE,
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "Artifact"
+    assert result.atoms[0].reason == "literal_string_or_path_default"
+
+
+def test_script_content_field_raw_hash_still_scores_ioc():
+    """A raw hash/IP embedded in script text is unaffected by this fix -
+    IOC is already the lowest tier, and is_raw_ioc is checked before the
+    script-content gate."""
+    rule = _rule(
+        {
+            "selection": {"ScriptBlockText|contains": "d41d8cd98f00b204e9800998ecf8427e"},
+            "condition": "selection",
+        },
+        logsource=_PS_SCRIPT_LOGSOURCE,
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "IOC"
+
+
+def test_script_content_field_does_not_suppress_protected_literal():
+    """Out of scope for this fix, verified rather than assumed: a
+    protected-literal match (an OS/protocol-defined string) inside a
+    script-content field is unaffected - protected_literals.is_protected is
+    checked before the script-content gate in classify_atom, unchanged."""
+    rule = _rule(
+        {
+            "selection": {"ScriptBlockText|contains": "CurrentVersion\\Run"},
+            "condition": "selection",
+        },
+        logsource=_PS_SCRIPT_LOGSOURCE,
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "TTP"
+
+
+def test_binary_identity_field_tool_match_unaffected_by_script_content_fix():
+    """Negative fixture: the SAME cmdlet-shaped string, in a genuine
+    process-identity field, must still score Tool - the fix gates on field
+    identity, it does not lower the tool-vocabulary signal globally."""
+    rule = _rule({"selection": {"Image|endswith": "\\Invoke-Something.exe"}, "condition": "selection"})
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "Tool"
+
+
+def test_commandline_field_is_a_disclosed_gap_not_touched_by_this_fix():
+    """CommandLine was explicitly considered and left out (see
+    fragility._SCRIPT_CONTENT_FIELD_NAMES's docstring) - this rule keeps
+    its PRE-FIX behavior, proving the fix's scope is exactly ScriptBlockText
+    today, not silently broader."""
+    rule = _rule({"selection": {"CommandLine|contains": "Invoke-WebRequest"}, "condition": "selection"})
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "Tool"
+
+
+def test_canonical_renamed_binary_rule_still_classifies_ttp_after_script_content_fix():
+    """Re-assert the load-bearing canonical case (see
+    test_canonical_renamed_binary_rule_classifies_ttp above) explicitly in
+    this section - the structural FIELD_MISMATCH promotion happens before
+    atom-level classification even runs, so it cannot be touched by this
+    fix, but it is re-verified here as a direct regression check for this
+    change specifically, not just inherited from an unrelated test."""
+    path = SIGMA_REPO / "rules/windows/process_creation/proc_creation_win_renamed_binary_highly_relevant.yml"
+    rules, failures = loader.load_file(path)
+    assert failures == []
+    tree = ast_repr.build_ast(rules[0].rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "TTP"
+    assert "FIELD_MISMATCH" in result.structural_findings
