@@ -58,20 +58,55 @@ which tool ran, only about what the attacker happened to type. `ScriptBlockText`
 Logging, Event ID 4104) is the clean, unambiguous case: it is the verbatim,
 un-resolved source text of the script as written, so `ScriptBlockText|
 contains: 'Invoke-WebRequest'` is defeated by writing `iwr` instead - no
-tool switch required, just a one-character alias. The existing field-context
-logic (`_PROCESS_CONTEXT_FIELD_NAMES`, the Task 8 fix that stopped Splunk
-over-scoring) only ever asked "is this a process/image/commandline identity
-field" vs. "unrelated" - it had no third category for "this field is raw
-text the attacker authored." Fixed via `_SCRIPT_CONTENT_FIELD_NAMES` /
-`field_carries_script_content`, which gates OFF both of `is_tool_value`'s
-signal paths (catalog lookup AND the two pattern regexes) for that field,
-and a dedicated `classify_atom` branch that gives the resulting Artifact-tier
-atom its own explanation rather than the generic literal-string default - see
-the comment on `_SCRIPT_CONTENT_FIELD_NAMES` below for exactly which other
-candidate fields (CommandLine, ps_module's Payload/ContextInfo, ps_classic's
-Data) were considered and deliberately left out, and why. See RESULTS.md,
-"Bug fix: script-content field durability inversion" for the full
-investigation, including the STP re-validation this fix moved.
+tool switch required, just a one-character alias. Originally fixed AD HOC
+via a single-field special case (`_SCRIPT_CONTENT_FIELD_NAMES`/
+`field_carries_script_content`, gating off `is_tool_value`'s signal paths
+for that one field name) - see RESULTS.md, "Bug fix: script-content field
+durability inversion" for that original investigation and the STP
+re-validation it moved.
+
+An EIGHTH cause, the same bug in the OPPOSITE direction, found immediately
+after the seventh was generalized (see below): `GrantedAccess='0x1010'`
+(the LSASS credential-dumping access-mask case - `docs/stp-alignment.md`'s
+own cited STP Level 4 example, `TargetImage=lsass.exe` + `GrantedAccess`)
+scored Artifact tier - wrongly COSMETIC. `0x1010`/`0x1410` are Windows'
+own access-control bitmask values (PROCESS_VM_READ | PROCESS_QUERY_
+(LIMITED_)INFORMATION - see Microsoft's "Process Security and Access
+Rights" docs, the same source SigmaHQ's own canonical LSASS rules cite);
+they are not an attacker's stylistic choice, they ARE the capability being
+requested - changing the bit pattern forfeits the access, unlike renaming a
+file. The classifier had no notion that a field's value can be FUNCTIONALLY
+REQUIRED rather than freely chosen, the mirror image of cause seven's
+missing notion (a field's value can be FRAGILE regardless of what string it
+is).
+
+**Both the seventh and eighth causes are the SAME bug**: an atom's tier was
+decided from `value` alone, when it must be decided from `(field, value)`
+TOGETHER, because the FIELD determines whether a value is a functional
+constraint, attacker-authored text, a durable binary identity, a
+data-source label, or a truly free literal. Fixed with ONE mechanism
+covering both directions (and two more roles beyond them) instead of a
+second ad-hoc special case: `mechanic.field_semantics` - a small, bounded,
+DOCUMENTED registry mapping FIELD -> ROLE (`BINARY_IDENTITY`,
+`ATTACKER_AUTHORED_TEXT`, `FUNCTIONAL_CONSTRAINT`, `DATA_SOURCE_SELECTOR`,
+default `GENERIC`), resolved BEFORE surface-form classification and
+governing what it does. The seventh cause's original ad-hoc mechanism
+(`_SCRIPT_CONTENT_FIELD_NAMES`/`field_carries_script_content`) is REMOVED
+entirely and re-expressed as the `ATTACKER_AUTHORED_TEXT` role - same
+behavior, one registry instead of a parallel special case that the next
+domain-specific field would otherwise need its own copy of. See
+`mechanic/field_semantics.py`'s module docstring for the full field-by-role
+registry, provenance per field, and which candidate fields were considered
+and deliberately left `GENERIC` rather than guessed - or
+[`docs/field-semantics.md`](../docs/field-semantics.md) for the same
+material as reference documentation, plus the Part 4/5 validation results
+(explanation-completeness fix, STP re-validation) not repeated here. A
+THIRD, independent
+consequence of this same registry (Part 2 of the brief that introduced it):
+when a literal matches NO known signal at all (not protected, not IOC-
+shaped, not a registered field role, not tool-vocabulary-shaped) it no
+longer silently asserts "Artifact, high confidence, cosmetic" - see
+`classify_atom`'s final fallback branch.
 
 ORDER OF OPERATIONS per rule:
   1. UNSCOREABLE?            -> own bucket, no tier assigned.
@@ -98,7 +133,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from mechanic import ast_repr, protected_literals, refdata, structural_detectors
+from mechanic import ast_repr, field_semantics, protected_literals, refdata, structural_detectors
 
 AstNode = dict[str, Any]
 
@@ -121,39 +156,15 @@ _CMDLET_RE = re.compile(
 )
 _EXE_RE = re.compile(r"\b[a-z0-9_\-]+\.exe\b", re.I)
 
-_EVENTID_SYSCALL_EXACT = {"eventid", "eventcode", "event.code", "syscall", "auditd.data.syscall"}
-# Generalized beyond EventID/syscall after the AND/OR combination fix
-# surfaced the same failure mode for a different family of fields: a
-# DATA-SOURCE-IDENTIFICATION field says WHICH platform/service/API emitted
-# an event - it is not something the adversary independently varies (using
-# the EC2 API to disable EBS encryption unavoidably sets eventSource to
-# ec2.amazonaws.com; there is no adversary choice being evaded there,
-# unlike a renamable filename). Under the corrected AND=MIN combination,
-# leaving these fields un-excluded meant every AND-linked cloud-audit rule
-# got dragged down to its data-source-selector's generic Artifact tier
-# instead of its actual substantive (often TTP-tier, protected) action
-# field - found immediately when the AND/OR fix was first run against the
-# LLM development set (19/30 SigmaHQ rules flipped, nearly all cloud-audit
-# rules) and confirmed to be this exact mechanism, not revealed label bias,
-# before accepting the result - see RESULTS.md.
-_EVENTID_SYSCALL_LAST_SEGMENT = {
-    "eventid", "eventcode", "syscall",
-    "eventsource",  # AWS CloudTrail's service-identifier field (ec2.amazonaws.com, ...)
-    "provider",  # Elastic's event.provider (same AWS-service-identifier role as eventSource)
-    "dataset",  # ECS data_stream.dataset - which integration produced the event
-    "sourcetype",  # Splunk's own data-source-type identifier
-}
-
-
 def _is_eventid_or_syscall_field(field_name: Optional[str]) -> bool:
     """Despite the name (kept for continuity with existing call sites and
-    tests predating this generalization), this now covers the broader
-    "data-source selector, not adversary-controlled" category - see the
-    comment on `_EVENTID_SYSCALL_LAST_SEGMENT` above."""
-    f = (field_name or "").lower()
-    if f in _EVENTID_SYSCALL_EXACT:
-        return True
-    return f.rsplit(".", 1)[-1] in _EVENTID_SYSCALL_LAST_SEGMENT
+    tests predating a generalization made before `field_semantics.py`
+    existed - `mechanic.experimental.multiformat.text_fragility` imports
+    this exact name directly and must keep working unchanged), this is a
+    thin wrapper over the field-semantics registry's `DATA_SOURCE_SELECTOR`
+    role - see `field_semantics.py` for the actual field sets and their
+    provenance, not duplicated here."""
+    return field_semantics.field_role(field_name) == field_semantics.DATA_SOURCE_SELECTOR
 
 
 def is_raw_ioc(value: Any) -> bool:
@@ -193,112 +204,21 @@ def _has_executable_context(value: str) -> bool:
 # substitution argument, a URL field) that have nothing to do with a process.
 # A catalog lookup should only run at all when the FIELD plausibly carries a
 # process/image/command-line value - name length doesn't discriminate that,
-# field identity does. Covers Sysmon-style PascalCase (Image, CommandLine,
-# NewProcessName, ParentImage), ECS (process.name, process.command_line,
-# process.parent.executable), and Splunk CIM snake_case (Processes.process,
-# Processes.process_name, Processes.original_file_name) uniformly by
-# normalizing away case and underscores before comparing.
-_PROCESS_CONTEXT_FIELD_NAMES = {
-    "image", "parentimage", "targetimage", "currentimage", "sourceimage",
-    "grandparentimage", "previousimage", "newprocessname",
-    "originalfilename", "processname", "parentprocessname",
-    "process", "parentprocess", "executable", "parentexecutable",
-    "commandline", "parentcommandline", "processcommandline",
-    "name",  # bare ECS `process.name`/`process.parent.name` last segment
-    # Linux auditd EXECVE-record convention: a0 is argv[0] (the executable
-    # name), exe/comm are the full executable path / short command name -
-    # a DIFFERENT naming convention for the same "this is the process"
-    # concept, caught by a regression this fix itself introduced
-    # (`lnx_auditd_unzip_hidden_zip_files_steganography.yml` keys on `a0`).
-    "a0", "exe", "comm",
-}
-
-
-def _normalize_field_last_segment(field: Optional[str]) -> str:
-    seg = (field or "").rsplit(".", 1)[-1].lower()
-    return seg.replace("_", "")
-
-
-def field_carries_process_context(field: Optional[str]) -> bool:
-    return _normalize_field_last_segment(field) in _PROCESS_CONTEXT_FIELD_NAMES
-
-
-# ATTACKER-AUTHORED SCRIPT CONTENT is a different axis from process context
-# above, and inverts the same tool-vocabulary signal instead of just gating
-# it on/off: a cmdlet/tool-shaped substring in one of these fields is text
-# the attacker wrote, not evidence of which tool ran, so it must NOT earn
-# Tool tier the way the identical string would in a binary-identity field.
-#
-# `scriptblocktext` is the field this was found against, and the only one
-# included here with full confidence:
-#
-#   - Sigma `logsource.category: ps_script` (Windows PowerShell Script
-#     Block Logging, Event ID 4104) logs the VERBATIM, un-resolved source
-#     text of the script as written - Microsoft's own documentation for
-#     this feature describes it as capturing script blocks "as they are
-#     executed", not a normalized/alias-resolved record. `Invoke-WebRequest`
-#     appearing in ScriptBlockText is defeated by writing `iwr` (a built-in
-#     alias) instead - no tool switch, a one-character rename.
-#   - Checked empirically against two real, independently-sourced rule
-#     corpora (hayabusa-rules' vendored SigmaHQ mirror + its own builtin
-#     set, ~5,000 rules total, at the time this was written): every single
-#     rule using a field literally named `ScriptBlockText` (186/186) has
-#     `logsource.category: ps_script` - this field name carries no
-#     collision risk with an unrelated meaning in real-world rules.
-#
-# Candidate fields considered and deliberately NOT included here - each is
-# a disclosed scope decision, not an oversight:
-#
-#   - `CommandLine`/`ParentCommandLine`/`ProcessCommandLine`: genuinely
-#     mixed - argv[0] (a real binary path/identity, already reached via
-#     `field_carries_process_context`'s catalog-lookup branch, validated by
-#     the FIELD_MISMATCH canonical case this fix must not regress) sits in
-#     the same string as attacker-authored arguments. This module has no
-#     argv parser to split the two apart, and guessing which portion a
-#     `|contains` match landed in would be exactly the kind of unprincipled,
-#     per-rule guess Part 2's design brief warned against - left as a
-#     disclosed gap for future work with real argv-aware parsing, not
-#     silently swept into this fix.
-#   - `Payload`/`ContextInfo` (Sigma `logsource.category: ps_module`,
-#     PowerShell Module Logging, Event ID 4103): superficially the same
-#     shape as ScriptBlockText, but PowerShell's module-logging pipeline
-#     resolves an invoked cmdlet's ALIAS to its real name before logging
-#     it (`CommandInvocation(Get-WmiObject)` is what gets written even if
-#     the attacker typed `gwmi`) - a cmdlet-name substring match here is
-#     NOT trivially defeated by the same alias-rename trick that breaks a
-#     ScriptBlockText match, so treating it identically would be a guess
-#     dressed up as the same fix, not the same fix. Left untouched pending
-#     its own dedicated investigation of what module logging actually
-#     resolves and what it doesn't (e.g. raw .NET method calls bypass
-#     module logging's ParameterBinding entirely, a real but different
-#     evasion this module does not currently reason about).
-#   - `Data` (Sigma `logsource.category: ps_classic`/`ps_classic_start`,
-#     classic PowerShell transcript/host-start logging, Event ID 400/800):
-#     the same free-text-content argument applies in principle, but unlike
-#     ScriptBlockText the bare field name `Data` is NOT unambiguous - the
-#     same empirical corpus check above found 18 real rules using a field
-#     named `Data` under `service: application` (unrelated Windows
-#     Application-log events) and 2 more under `service:
-#     msexchange-management`, neither of which carries attacker-authored
-#     script content. Gating on `Data` by name alone would misclassify
-#     those. Doing this correctly needs the field-name check to also see
-#     the rule's logsource category, which classify_atom does not have
-#     threaded through today - left as a disclosed, uncovered gap rather
-#     than guessed at.
-_SCRIPT_CONTENT_FIELD_NAMES = {"scriptblocktext"}
-
-
-def field_carries_script_content(field: Optional[str]) -> bool:
-    return _normalize_field_last_segment(field) in _SCRIPT_CONTENT_FIELD_NAMES
+# field identity does. `field_semantics.field_role` == BINARY_IDENTITY is
+# that field-identity test now (formerly this module's own
+# `_PROCESS_CONTEXT_FIELD_NAMES`/`field_carries_process_context` - moved
+# into the shared registry, same field set, same normalization, see
+# `field_semantics.py` for the full list and provenance).
 
 
 def _tool_shaped_ignoring_field_context(value: Any) -> bool:
     """The raw tool-vocabulary signal (catalog OR pattern match), with
-    every field-context gate removed. NEVER used to assign a tier -
+    every field-role gate removed. NEVER used to assign a tier -
     `is_tool_value` (which applies the gates) is the only function that
-    does that. Used only so a script-content-field atom that got forced to
-    Artifact still gets told apart, in its `reason`, from an atom that was
-    never going to be tool-shaped in the first place - see `classify_atom`."""
+    does that. Used only so an ATTACKER_AUTHORED_TEXT-field atom that got
+    forced to Artifact still gets told apart, in its `reason`, from an atom
+    that was never going to be tool-shaped in the first place - see
+    `classify_atom`."""
     if not isinstance(value, str) or not value:
         return False
     if _CMDLET_RE.search(value):
@@ -311,31 +231,31 @@ def _tool_shaped_ignoring_field_context(value: Any) -> bool:
 def is_tool_value(value: Any, field: Optional[str] = None) -> bool:
     if not isinstance(value, str) or not value:
         return False
-    if field_carries_script_content(field):
-        # Attacker-authored script text (see _SCRIPT_CONTENT_FIELD_NAMES
-        # above) - neither signal path below is trustworthy here: a
-        # catalog/pattern hit says the attacker's script TEXT happens to
-        # mention a tool-shaped string, not that a specific tool ran.
-        # Falls through to classify_atom's Artifact default (with its own,
-        # specific explanation - see the
+    role = field_semantics.field_role(field)
+    if role == field_semantics.ATTACKER_AUTHORED_TEXT:
+        # Attacker-authored text (field_semantics.py) - neither signal path
+        # below is trustworthy here: a catalog/pattern hit says the
+        # attacker's TEXT happens to mention a tool-shaped string, not that
+        # a specific tool ran. Falls through to classify_atom's Artifact
+        # default (with its own, specific explanation - see the
         # attacker_authored_script_content_field branch there).
         return False
-    if field_carries_process_context(field):
+    if role == field_semantics.BINARY_IDENTITY:
         basename = _basename(value)
         if refdata.is_known_tool_name(basename):
             if len(basename) >= _SHORT_TOOL_NAME_MIN_LEN or _has_executable_context(value):
                 return True
             # else: fall through - a short name with no executable-context
-            # marker is suppressed even within a process-context field.
+            # marker is suppressed even within a binary-identity field.
     # CMDLET_RE/EXE_RE are pattern-shaped matches (a value that itself LOOKS
     # like "Invoke-Something" or "foo.exe"), not a word-list lookup against
     # thousands of catalog entries - the field-context ambiguity that
     # motivates gating the catalog lookup doesn't apply to these THE SAME
     # WAY (an ordinary word colliding with a catalog entry), so they stay
     # unconditional with respect to THAT concern - but they are still
-    # subject to the script-content gate above, which is a different axis
-    # entirely (not "does this word collide with the catalog", but "did the
-    # attacker author this text").
+    # subject to the ATTACKER_AUTHORED_TEXT gate above, which is a different
+    # axis entirely (not "does this word collide with the catalog", but "did
+    # the attacker author this text").
     if _CMDLET_RE.search(value):
         return True
     if _EXE_RE.search(value):
@@ -349,6 +269,21 @@ class AtomClassification:
     value: Any
     tier: str
     reason: str
+    # "high" (default) for every atom classified via a recognized signal
+    # (a protected literal, a data-source selector, a raw IOC pattern, a
+    # functional-constraint field, attacker-authored-text handling, or a
+    # real tool/catalog/pattern match) - "medium" ONLY for the final,
+    # no-known-signal-matched fallback in `classify_atom` (the honest
+    # floor: mechanic doesn't know what an unrecognized value means, so it
+    # must not claim "cosmetic" with the same confidence as a value it
+    # actually recognizes). Deliberately a SEPARATE axis from
+    # `priority.FragilitySignal.confidence` (which measures whether AST
+    # parsing/combination succeeded at all, not per-atom semantic
+    # certainty about a value mechanic DID manage to classify) - conflating
+    # "we parsed this rule" with "we're sure this specific value means what
+    # we think it means" is exactly the kind of overclaim this field exists
+    # to stop making.
+    semantic_confidence: str = "high"
 
 
 @dataclass
@@ -369,33 +304,74 @@ class RuleClassification:
             "structural_findings": self.structural_findings,
             "structural_detail": self.structural_detail,
             "atoms": [
-                {"field": a.field, "value": a.value, "tier": a.tier, "reason": a.reason} for a in self.atoms
+                {
+                    "field": a.field,
+                    "value": a.value,
+                    "tier": a.tier,
+                    "reason": a.reason,
+                    "semantic_confidence": a.semantic_confidence,
+                }
+                for a in self.atoms
             ],
             "cloud_audit_context": self.cloud_audit_context,
         }
 
 
 def classify_atom(field_name: Optional[str], value: Any, cloud_context: bool) -> AtomClassification:
+    """Field-aware: resolves `field_semantics.field_role(field_name)` BEFORE
+    any surface-form (value-shape) classification, and the role governs
+    what happens next - see `mechanic/field_semantics.py`'s module
+    docstring for why this must be `(field, value)` together, not `value`
+    alone (the seventh/eighth-cause bug this replaces, `fragility.py`'s own
+    module docstring)."""
     protected, reason = protected_literals.is_protected(field_name or "", value, cloud_context)
     if protected:
         return AtomClassification(field_name, value, "TTP", reason)
-    if _is_eventid_or_syscall_field(field_name):
+
+    role = field_semantics.field_role(field_name)
+
+    if role == field_semantics.DATA_SOURCE_SELECTOR:
         # Structural test (not a blanket exclude): handled by the caller,
-        # which knows whether OTHER non-eventid leaves exist in this rule.
+        # which knows whether OTHER non-selector leaves exist in this rule.
         # Here we only report the raw tier a bare literal-match would imply.
         return AtomClassification(field_name, value, "Artifact", "eventid_or_syscall_field")
+
     if is_raw_ioc(value):
         return AtomClassification(field_name, value, "IOC", "raw_ioc_pattern")
-    if field_carries_script_content(field_name) and _tool_shaped_ignoring_field_context(value):
+
+    if role == field_semantics.FUNCTIONAL_CONSTRAINT:
+        # The FIELD carries the durability, not this specific value - see
+        # field_semantics.py's FUNCTIONAL_CONSTRAINT docstring (the LSASS
+        # GrantedAccess case). ANY positive match here is treated as
+        # durable (TTP) regardless of which exact value it is, unlike
+        # BINARY_IDENTITY below, which still needs a real tool/catalog
+        # match on the value.
+        return AtomClassification(field_name, value, "TTP", "functional_constraint_field")
+
+    if role == field_semantics.ATTACKER_AUTHORED_TEXT and _tool_shaped_ignoring_field_context(value):
         # Would have scored Tool by string shape alone - forced to Artifact
-        # because the field is attacker-authored script content (see
-        # _SCRIPT_CONTENT_FIELD_NAMES), with a reason distinct from the
-        # generic literal default so callers (priority.py's narrative) can
-        # explain WHY, not just report the demoted tier.
+        # because the field is attacker-authored text (field_semantics.py),
+        # with a reason distinct from the generic literal default so
+        # callers (priority.py's narrative) can explain WHY, not just
+        # report the demoted tier.
         return AtomClassification(field_name, value, "Artifact", "attacker_authored_script_content_field")
+
     if is_tool_value(value, field_name):
         return AtomClassification(field_name, value, "Tool", "known_tool_name_or_cmdlet_or_exe_pattern")
-    return AtomClassification(field_name, value, "Artifact", "literal_string_or_path_default")
+
+    # No known signal matched AT ALL: not a protected literal, not a
+    # data-source selector, not IOC-shaped, not a functional-constraint
+    # field, not attacker-authored-text-shaped, not a recognized
+    # tool/catalog/pattern match. Artifact is still the right DEFAULT tier
+    # (nothing here earned a higher one) - but mechanic does not know what
+    # this specific value actually means, and must not assert that it does.
+    # This is the honest floor for the unbounded tail of domain-specific
+    # values field_semantics.py's bounded, documented registry doesn't (and
+    # by design never will fully) cover - semantic_confidence drops to
+    # "medium", and the reason says "unrecognized," never "cosmetic."
+    return AtomClassification(
+        field_name, value, "Artifact", "unrecognized_literal_no_known_signal", semantic_confidence="medium"
+    )
 
 
 def _leaf_value_for_classification(leaf: AstNode) -> Any:

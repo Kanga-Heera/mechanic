@@ -461,9 +461,13 @@ def test_script_content_field_multi_atom_rule_from_the_hand_test():
 def test_script_content_field_ordinary_literal_keeps_default_reason():
     """An atom in ScriptBlockText that was NEVER tool-vocabulary-shaped
     (doesn't match the catalog or either pattern) must still get the
-    ordinary literal_string_or_path_default reason, not the script-content
-    one - the new reason is specifically for atoms that WOULD have scored
-    Tool, not a blanket relabel of every ScriptBlockText atom."""
+    ordinary unrecognized-literal reason, not the script-content-specific
+    one - that reason is specifically for atoms that WOULD have scored
+    Tool, not a blanket relabel of every ScriptBlockText atom. Per the
+    field-semantics fix's Part 2 (the GENERIC/unknown-value honest floor),
+    this also now carries medium, not high, semantic_confidence - mechanic
+    doesn't recognize this specific value's meaning and must not claim it
+    does."""
     rule = _rule(
         {"selection": {"ScriptBlockText|contains": "totally ordinary sentence"}, "condition": "selection"},
         logsource=_PS_SCRIPT_LOGSOURCE,
@@ -471,7 +475,8 @@ def test_script_content_field_ordinary_literal_keeps_default_reason():
     tree = ast_repr.build_ast(rule)
     result = fragility.classify_rule(tree)
     assert result.tier == "Artifact"
-    assert result.atoms[0].reason == "literal_string_or_path_default"
+    assert result.atoms[0].reason == "unrecognized_literal_no_known_signal"
+    assert result.atoms[0].semantic_confidence == "medium"
 
 
 def test_script_content_field_raw_hash_still_scores_ioc():
@@ -519,9 +524,9 @@ def test_binary_identity_field_tool_match_unaffected_by_script_content_fix():
 
 def test_commandline_field_is_a_disclosed_gap_not_touched_by_this_fix():
     """CommandLine was explicitly considered and left out (see
-    fragility._SCRIPT_CONTENT_FIELD_NAMES's docstring) - this rule keeps
-    its PRE-FIX behavior, proving the fix's scope is exactly ScriptBlockText
-    today, not silently broader."""
+    field_semantics.py's `_ATTACKER_AUTHORED_TEXT_FIELDS` comment) - this
+    rule keeps its PRE-FIX behavior, proving the fix's scope is exactly
+    ScriptBlockText today, not silently broader."""
     rule = _rule({"selection": {"CommandLine|contains": "Invoke-WebRequest"}, "condition": "selection"})
     tree = ast_repr.build_ast(rule)
     result = fragility.classify_rule(tree)
@@ -542,3 +547,164 @@ def test_canonical_renamed_binary_rule_still_classifies_ttp_after_script_content
     result = fragility.classify_rule(tree)
     assert result.tier == "TTP"
     assert "FIELD_MISMATCH" in result.structural_findings
+
+
+# ---------------------------------------------------------------------------
+# Field-semantics registry (mechanic.field_semantics) - one mechanism
+# replacing the ad-hoc ScriptBlockText special case AND fixing the
+# GrantedAccess access-mask case (RESULTS.md-style bug: same root cause,
+# both directions - ScriptBlockText wrongly durable, GrantedAccess wrongly
+# cosmetic). Fixtures below are keyed by FIELD ROLE, not by memorized
+# value, per the fix's own brief.
+# ---------------------------------------------------------------------------
+
+_PROCESS_ACCESS_LOGSOURCE = {"category": "process_access", "product": "windows"}
+
+
+def test_functional_constraint_granted_access_scores_ttp_durable():
+    """The hand-tested bug: GrantedAccess='0x1010' used to score Artifact
+    (an ordinary hex string matching no known signal) - wrongly COSMETIC.
+    0x1010 is PROCESS_VM_READ|PROCESS_QUERY_(LIMITED_)INFORMATION, the
+    exact rights LSASS credential dumping requires - changing the bit
+    pattern forfeits the access, so it must score TTP (durable), not
+    Artifact."""
+    rule = _rule(
+        {"selection": {"GrantedAccess": "0x1010"}, "condition": "selection"},
+        logsource=_PROCESS_ACCESS_LOGSOURCE,
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "TTP"
+    assert result.atoms[0].reason == "functional_constraint_field"
+    assert result.atoms[0].semantic_confidence == "high"
+
+
+def test_functional_constraint_any_value_is_durable_not_just_the_canonical_ones():
+    """FIELD-level, not a value wordlist: an access-mask value OTHER than
+    the canonical 0x1010/0x1410 examples must still score TTP - the
+    durability comes from the FIELD (what it represents), not from
+    matching one specific memorized hex string."""
+    rule = _rule(
+        {"selection": {"GrantedAccess": "0x143a"}, "condition": "selection"},
+        logsource=_PROCESS_ACCESS_LOGSOURCE,
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "TTP"
+
+
+def test_functional_constraint_access_mask_field_variant():
+    """The Windows-Security-auditing sibling field (Event ID 4656/4663) -
+    same access-control-bitmask mechanism, different telemetry source."""
+    rule = _rule(
+        {"selection": {"AccessMask": "0x0040"}, "condition": "selection"},
+        logsource={"category": "registry_access", "product": "windows"},
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "TTP"
+
+
+def test_functional_constraint_field_not_guessed_for_integrity_level():
+    """Negative fixture: IntegrityLevel is a DIFFERENT mechanism (an
+    OS-assigned privilege level, not an access-rights bitmask) - explicitly
+    excluded from FUNCTIONAL_CONSTRAINT, must NOT score TTP just because it
+    superficially resembles GrantedAccess (a Windows security field with a
+    short enumerated-looking value)."""
+    rule = _rule(
+        {"selection": {"IntegrityLevel": "Medium"}, "condition": "selection"},
+        logsource=_PROCESS_ACCESS_LOGSOURCE,
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier != "TTP"
+
+
+def test_lsass_access_rule_min_lands_on_real_weakest_atom_not_granted_access():
+    """The full hand-tested regression: TargetImage=lsass.exe (Tool, via
+    the pre-existing unconditional _EXE_RE pattern - unaffected by this
+    fix) AND-linked with GrantedAccess (now TTP, functional constraint).
+    Before this fix, GrantedAccess scored Artifact and wrongly dragged the
+    whole rule down to Artifact (the weakest-possible reading of a rule
+    that is actually durable on both its real atoms). After the fix, MIN
+    correctly lands on Tool (TargetImage), the genuine weakest link -
+    GrantedAccess is no longer the accidental floor."""
+    rule = _rule(
+        {
+            "selection": {
+                "TargetImage|endswith": "\\lsass.exe",
+                "GrantedAccess": ["0x1410", "0x1010", "0x410"],
+            },
+            "condition": "selection",
+        },
+        logsource=_PROCESS_ACCESS_LOGSOURCE,
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "Tool"
+    granted_access_atoms = [a for a in result.atoms if a.field == "GrantedAccess"]
+    assert granted_access_atoms and all(a.tier == "TTP" for a in granted_access_atoms)
+    target_image_atoms = [a for a in result.atoms if a.field == "TargetImage"]
+    assert target_image_atoms and target_image_atoms[0].tier == "Tool"
+
+
+def test_renamed_rundll32_field_mismatch_still_classifies_ttp():
+    """Regression (must not move): a renamed-rundll32 FIELD_MISMATCH shape
+    (OriginalFileName positive, Image under a NOT filter, opposite
+    polarity, same basename) - the structural promotion runs before any
+    atom-level field-role logic and must be completely unaffected by it."""
+    rule = _rule(
+        {
+            "selection": {"OriginalFileName": "RUNDLL32.EXE"},
+            "filter": {"Image|endswith": "\\rundll32.exe"},
+            "condition": "selection and not filter",
+        }
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "TTP"
+    assert "FIELD_MISMATCH" in result.structural_findings
+
+
+def test_non_system_rundll32_scores_tool_on_rundll32_alone():
+    """Regression (must not move): a plain rundll32.exe match with negated
+    ParentImage exclusions - the negated filter leaves are excluded from
+    the AND/OR combination entirely (unaffected by this fix), so the tier
+    is driven by the Image atom alone."""
+    rule = _rule(
+        {
+            "selection": {"Image|endswith": "\\rundll32.exe"},
+            "filter": {"ParentImage|endswith": ["\\explorer.exe", "\\svchost.exe"]},
+            "condition": "selection and not filter",
+        }
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "Tool"
+    assert result.structural_findings == []
+
+
+def test_temp_path_and_payload_exe_both_present_as_atoms():
+    """Rule 2's shape: an unrecognized path literal AND-linked with a
+    `*.exe`-shaped filename (scores Tool via the pre-existing unconditional
+    _EXE_RE pattern, unrelated to this fix). MIN correctly lands on the
+    path (Artifact) - the completeness of the EXPLANATION citing both is
+    tested in test_priority.py, this just pins the underlying atom tiers
+    the explanation depends on."""
+    rule = _rule(
+        {
+            "selection": {
+                "TargetFilename|contains": "\\Temp\\",
+                "Image|endswith": "payload.exe",
+            },
+            "condition": "selection",
+        }
+    )
+    tree = ast_repr.build_ast(rule)
+    result = fragility.classify_rule(tree)
+    assert result.tier == "Artifact"
+    path_atoms = [a for a in result.atoms if a.field == "TargetFilename"]
+    image_atoms = [a for a in result.atoms if a.field == "Image"]
+    assert path_atoms and path_atoms[0].tier == "Artifact"
+    assert path_atoms[0].semantic_confidence == "medium"
+    assert image_atoms and image_atoms[0].tier == "Tool"
