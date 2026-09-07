@@ -3060,3 +3060,285 @@ tests/test_priority_matrix.py, 22 in tests/test_gui.py including the
 follow-up pass's rule-source/rule-history coverage, 7 added to
 tests/test_cli.py), 251 pass, 37 skipped (unchanged skip set).
 
+# Bug fix: script-content field durability inversion
+
+Found by a single hand-test of one real rule, not by any automated sweep -
+see Part 5 below for why that matters.
+
+## Part 1 — confirming the root cause
+
+**The test rule** (Sigma, `logsource.category: ps_script`):
+
+```yaml
+detection:
+  selection:
+    ScriptBlockText|contains:
+      - 'Invoke-WebRequest'
+      - 'Net.WebClient'
+      - 'DownloadString'
+      - 'DownloadFile'
+  condition: selection
+```
+
+**Observed (pre-fix):** classified Tool tier, high confidence, narrative
+text "evading it requires an attacker to actually switch tools." Traced
+directly, reproduced with a standalone script before touching any code:
+
+```
+tier Tool
+ScriptBlockText Invoke-WebRequest Tool known_tool_name_or_cmdlet_or_exe_pattern
+```
+
+**Mechanism, confirmed by reading the actual code path (`fragility.py`):**
+
+- `classify_atom` calls `is_tool_value(value, field)` for each positive leaf
+  not already caught by `protected_literals`/eventid/raw-IOC.
+- `is_tool_value` has two signal paths: (a) `refdata.is_known_tool_name`'s
+  catalog lookup, gated by `field_carries_process_context(field)` - correctly
+  OFF for `ScriptBlockText` (not in `_PROCESS_CONTEXT_FIELD_NAMES`); and (b)
+  `_CMDLET_RE`/`_EXE_RE`, two shape-based regexes ("looks like
+  `Invoke-Something`" / "looks like `foo.exe`") that the code runs
+  **unconditionally, regardless of field** - the comment directly above them
+  said so explicitly: "the field-context ambiguity that motivates gating the
+  catalog lookup doesn't apply to these, so they stay unconditional
+  regardless of which field carries the value."
+- `Invoke-WebRequest` matches `_CMDLET_RE`
+  (`\b(?:invoke|new|get|...)-[a-z][a-z0-9]+\b`), so `is_tool_value` returns
+  `True` regardless of field, and the atom scores Tool. The rule's
+  `|contains` list is OR-linked, so `_combine_ast_tier`'s OR -> MAX takes the
+  Tool-tier atom as the rule's overall tier.
+- **Confirmed the field-context logic has no attacker-authored-content
+  notion at all.** `field_carries_process_context`/`_PROCESS_CONTEXT_FIELD_NAMES`
+  (the Task 8 fix that stopped Splunk over-scoring, Part 2c) only ever
+  distinguishes "is this a process/image/commandline identity field" from
+  "unrelated" (`Channel`, `location`, ...) - there was no third category for
+  "this field is raw text the attacker authored," and nothing about the
+  `_CMDLET_RE`/`_EXE_RE` design (which solved a *different* problem -
+  under-triggering on cmdlet/exe-shaped literals the catalog lookup wasn't
+  reaching) was ever evaluated against a script-content rule, because none
+  of the hand-label re-validation examples that motivated it were
+  script-content rules.
+
+**Root cause, confirmed, stated once:** `is_tool_value`'s pattern-shaped
+signals assign Tool tier from the matched STRING alone, with no field-context
+gate, so a cmdlet-shaped substring earns Tool tier identically whether it
+names the actual running binary (`Image: ...\Invoke-Something.exe`, durable
+- the FIELD_MISMATCH canonical case's whole thesis) or is text the attacker
+typed into a script that Windows will log verbatim (`ScriptBlockText`,
+defeated by writing `iwr` instead - a one-character alias, not a tool
+switch).
+
+## Part 2 — the fix, from the principle
+
+**Principle:** a literal/tool match's durability depends on whether the
+attacker controls the TEXT of the field being matched, not on whether the
+matched string happens to be in the tool vocabulary.
+
+**Field derivation, not a guess.** Checked empirically against ~5,000 real
+rules (a vendored SigmaHQ mirror + Hayabusa's own builtin set):
+
+| Field | Sigma `logsource.category` | Rules using it | All same category? |
+|---|---|---:|---|
+| `ScriptBlockText` | `ps_script` (PowerShell Script Block Logging, EventID 4104) | 186 | **186/186 yes** |
+| `Payload` | `ps_module` (PowerShell Module Logging, EventID 4103) | 21 | 21/21 yes |
+| `Data` | `ps_classic`/`ps_classic_start` (EventID 400/800) | 38 | **only 17/38** - 18 under unrelated `service: application`, 2 under `msexchange-management` |
+
+Only `ScriptBlockText` is included in the fix (`fragility._SCRIPT_CONTENT_FIELD_NAMES`),
+with full confidence:
+
+- Microsoft's own documentation of PowerShell Script Block Logging describes
+  it as capturing script blocks "as they are executed" - the VERBATIM,
+  un-resolved source text, not a normalized or alias-resolved record.
+- 100% unambiguous in real-world usage (table above) - no collision risk
+  with an unrelated field meaning.
+
+**Deliberately excluded, each a disclosed scope decision, not a guess (per
+the brief's own "if unsure, tier conservatively and flag it, don't guess"):**
+
+- **`CommandLine`/`ParentCommandLine`/`ProcessCommandLine`** - genuinely
+  mixed: argv[0] is a real binary path/identity (already reached via the
+  process-context catalog branch, validated by the FIELD_MISMATCH canonical
+  case this fix must not regress), sitting in the same string as
+  attacker-authored arguments. This module has no argv parser to split the
+  two apart, and guessing which portion a `|contains` match landed in would
+  be exactly the kind of per-rule guess the brief warned against. Verified
+  unchanged: `test_commandline_field_is_a_disclosed_gap_not_touched_by_this_fix`.
+- **`Payload`/`ContextInfo`** (`ps_module`) - superficially the same shape,
+  but PowerShell's module-logging pipeline resolves an invoked cmdlet's
+  ALIAS to its real name before logging it (`CommandInvocation(Get-WmiObject)`
+  is what gets written even if the attacker typed `gwmi`) - confirmed by
+  reading a real Event ID 4103 sample. A cmdlet-name match here is NOT
+  defeated by the same alias-rename trick that breaks a ScriptBlockText
+  match, so treating it identically would be guessing, not applying the same
+  fix. Left for its own dedicated investigation (what module logging
+  resolves vs. what it doesn't - e.g. raw .NET method calls bypass its
+  ParameterBinding entirely, a real but different evasion).
+- **`Data`** (`ps_classic`) - the free-text argument applies in principle,
+  but the bare field name collides with unrelated real rules (table above).
+  Doing this correctly needs the logsource category threaded into
+  `classify_atom`, which this fix does not do - left as a disclosed,
+  uncovered gap.
+
+**Implementation** (`mechanic/fragility.py`): `field_carries_script_content`
+gates OFF *both* of `is_tool_value`'s signal paths (catalog lookup AND the
+two pattern regexes) for `ScriptBlockText`. `classify_atom` gives an atom
+that WOULD have scored Tool (checked via `_tool_shaped_ignoring_field_context`,
+used only for this explanation, never for tiering) a distinct reason,
+`attacker_authored_script_content_field`, instead of the generic literal
+default - so the demotion is explainable, not silent. `priority.py`'s
+narrative gained a dedicated sentence for that reason: "The ScriptBlockText
+field holds attacker-authored script text, not a record of which tool ran -
+matching a tool or cmdlet name inside it doesn't require an attacker to
+actually switch tools, only to reword or obfuscate the script..." -
+replacing the old, inverted "evading it requires an attacker to actually
+switch tools" claim for this case (that generic sentence is still correct
+and still shown for genuine Tool-tier matches, e.g. `Image=mimikatz.exe`).
+
+`protected_literals.is_protected` is checked BEFORE the new script-content
+gate in `classify_atom`, unchanged - an OS/protocol-defined literal
+(autorun registry path, AD schema attribute, ...) embedded in script text is
+explicitly OUT of scope for this fix (verified,
+`test_script_content_field_does_not_suppress_protected_literal`), a
+separate question this task did not ask to be resolved, disclosed rather
+than silently swept in either direction.
+
+## Part 3 — tests, proving this generalizes and doesn't regress
+
+`tests/test_fragility.py` (13 new tests) and `tests/test_priority.py` (3 new
+tests):
+
+- **Positive**: the exact hand-tested multi-atom rule now tiers Artifact,
+  not Tool; a single-cmdlet variant; an `_EXE_RE`-shaped variant
+  (`certutil.exe`); an ordinary non-tool-shaped literal in ScriptBlockText
+  keeps the plain default reason (proving the new reason is only applied to
+  atoms that would actually have scored Tool, not a blanket relabel); a raw
+  hash in ScriptBlockText still scores IOC (unaffected, checked before the
+  new gate); a protected-literal match in ScriptBlockText still scores TTP
+  (unaffected, checked before the new gate).
+- **Negative** (must NOT regress): the canonical FIELD_MISMATCH renamed-binary
+  rule re-asserted TTP directly in this section (not just inherited from the
+  pre-existing test); the same cmdlet-shaped string in a genuine `Image`
+  field still scores Tool; `CommandLine|contains` with the same string still
+  scores Tool (the disclosed gap, proven unchanged, not silently fixed too).
+- **Narrative/explanation**: the new sentence appears and mentions the
+  correct field for a script-content demotion, the old inverted "switch
+  tools" claim does not appear for that case, and (negative) the new
+  sentence does NOT appear for an ordinary `Image`-field Tool match, where
+  the "switch tools" wording is still correct and still shown.
+- **End-to-end**: `priority._sigma_fragility` (the real CLI/GUI entry point)
+  on the exact hand-tested rule shape returns Artifact, not Tool.
+
+All new and pre-existing `test_fragility.py`/`test_priority.py` tests pass
+(54/54); full suite results and the STP re-validation are in Part 4 below.
+
+## Part 4 — re-validation against MITRE STP
+
+This fix changes real rule tiers, so it can move the STP correlation - it
+did. Reported plainly, not tuned to protect the number.
+
+**Which rows actually moved:** re-classified all 70 SigmaHQ rows in the
+frozen STP fixture before and after the fix. 12 rows use `ScriptBlockText`
+with a cmdlet/tool-shaped match; of those, **3 changed rule-level tier**
+(the other 9 were already pulled to a non-Tool tier by a different,
+AND-linked weaker atom or a structural finding, so the atom-level reason
+changed but the rule's overall tier didn't):
+
+| Rule | STP score | Tier before | Tier after |
+|---|---:|---|---|
+| Dump Credentials from Windows Credential Manager With PowerShell | 2 | Tool | Artifact |
+| Clear PowerShell History - PowerShell | 2 | Tool | Artifact |
+| AADInternals PowerShell Cmdlets Execution - PsScript | 2 | Tool | Artifact |
+
+**Core Sigma-only lock (n=70, `tests/test_validated_numbers_lock.py`):**
+
+| | Before | After |
+|---|---:|---:|
+| Kendall's tau-b | 0.3117 (p=0.0052) | **0.2841 (p=0.0112)** |
+| Spearman's rho | 0.3361 (p=0.0044) | **0.3056 (p=0.0101)** |
+| Mapped quadratic-weighted kappa | 0.2821 | **0.2249** |
+
+**Historical combined lock (n=72, SigmaHQ+Elastic+Splunk,
+`tests/experimental/test_multiformat_validated_numbers_lock.py`):**
+
+| | Before | After |
+|---|---:|---:|
+| Kendall's tau-b | 0.361 (p=0.0010) | **0.3449 (p=0.0017)** |
+| Spearman's rho | 0.392 (p=0.0007) | **0.3740 (p=0.0012)** |
+| Mapped quadratic-weighted kappa | 0.316 | **0.2653** |
+
+**It dropped. Investigated rather than reverted or tuned**, per the brief's
+own instruction. Pulled MITRE's own free-text justification for these exact
+rows from the source CSV (`scratchpad/stp_csv/ScoredAnalytics_05062025.csv`
+- not carried into the frozen JSON fixture, so not visible from the fixture
+alone):
+
+> "ScriptBlockText searches are reletivily [sic] easy to evade with
+> everyting [sic] being within adversary control but reqires [sic] a change
+> of the script."
+
+This is MITRE's own analyst note, independently, on effectively every
+ScriptBlockText-based rule in the sample (all 3 that changed tier, and most
+of the other 9) - **and it says almost exactly what this bug report said**:
+the match is easy to evade, everything is within adversary control, it only
+requires a script edit. That is a direct, textual, external confirmation of
+this fix's premise, not just internal reasoning about it.
+
+**So why did the correlation drop if MITRE agrees with the reasoning?**
+Because MITRE's ordinal SCALE and mechanic's tier boundary don't sit in the
+same place, and this fix exposed the seam. STP level 2 is labeled
+"Adversary-brought tool" - by NAME that sounds like mechanic's "Tool" tier,
+but MITRE's own justification text for these specific rows describes
+something closer to mechanic's "Artifact" tier (evadable "with everything
+... within adversary control," i.e., a small/cosmetic script edit, not a
+tool switch). MITRE appears to be scoring "did the adversary have to bring
+some capability at all" (a script, as opposed to a level-1 "ephemeral"
+indicator that costs nothing to have or not have) rather than "is the
+specific matched string swappable without changing capability," which is
+the axis mechanic's Tool/Artifact boundary actually measures. This is the
+same KIND of disclosed mapping seam `mechanic/data/STP_MAPPING.md` already
+documents for STP level 3 (Tool vs. TTP) - found here for level 2
+(Adversary-brought-tool vs. mechanic's Artifact) specifically for
+script-content rules, not previously documented because this fix is what
+surfaced it.
+
+A second, smaller contributor: MITRE's own scoring shows real
+inter-annotation noise in exactly this rule family - "DirectorySearcher
+Powershell Exploitation" and "Enumerate Credentials from Windows Credential
+Manager With PowerShell" carry near-identical justification text ("ScriptBlockText
+searches are reletivily easy to evade with everyting being within adversary
+control") but were scored 1 and 2 respectively. The STP scale's
+discriminating power at this exact boundary is itself limited for this rule
+family, independent of mechanic's tiering.
+
+**Decision: the fix stands as designed.** It is justified independently by
+the evasion reasoning (verified against actual PowerShell Script Block
+Logging semantics) and now also by MITRE's own textual justification for
+the affected rows, which agrees with it almost verbatim. The lock numbers
+above are updated to the new, honestly-lower (still positive, still
+significant) figures - not reverted, not re-tuned, and the mapping seam this
+fix exposed is disclosed rather than smoothed over.
+
+## Part 5 — how this was found, and what it says about validation
+
+Found by hand-testing ONE real rule, not by any automated sweep, corpus
+statistic, or the STP correlation itself - which had already shipped,
+re-validated multiple times, and looked healthy (tau-b=0.3117, positive,
+significant) with this exact classification bug sitting inside it the whole
+time. The aggregate correlation didn't catch it, and structurally couldn't:
+a 3-row tier flip inside a 70-row sample moves a rank correlation by a few
+hundredths, not enough to look wrong on its own, and the STP scale's own
+level-2 boundary (Part 4) is noisy enough at exactly this seam that a
+inflated mechanic tier didn't obviously stick out against it either.
+
+What DID catch it: reading one rule's actual output and asking whether the
+STATED REASON ("evading it requires an attacker to actually switch tools")
+was true for THIS rule, not just plausible in general. That's a hand-label /
+single-case audit, the same category of check Part 2c's original hand-label
+re-validation was, not a new kind of validation - the finding here is that
+this category of check remains necessary even after a tool has an external,
+statistically-significant validation number behind it. A correlation
+confirms the taxonomy tracks an external standard on average; it does not
+confirm every individual rule's stated reasoning is correct, and this bug
+is a concrete case where it wasn't, for 3 real, currently-shipping SigmaHQ
+rules, hiding inside a headline number that looked fine.
+
