@@ -353,6 +353,218 @@ def test_sigma_fragility_end_to_end_script_content_rule_not_tool(tmp_path: Path)
     assert frag.tier != "Tool"
 
 
+# ---------------------------------------------------------------------------
+# Field-semantics fix, Parts 4/2: explanation completeness (cite ALL
+# driving atoms and the rest of the basis, not an arbitrary subset) and the
+# honest confidence floor for genuinely unrecognized values.
+# ---------------------------------------------------------------------------
+
+
+def test_narrative_cites_functional_constraint_atom_and_does_not_call_it_cosmetic():
+    """The LSASS hand-test: GrantedAccess (now TTP/functional-constraint)
+    is NOT the atom that sets the tier (TargetImage, Tool, is weaker) - the
+    narrative must still name GrantedAccess among the OTHER matched values
+    and explain it is durable, not silently drop it or imply it's
+    cosmetic."""
+    frag = priority.FragilitySignal(
+        tier="Tool",
+        confidence="high",
+        and_or_corrected=True,
+        unscoreable=False,
+        unscoreable_reason=None,
+        structural_findings=[],
+        structural_detail={},
+        atoms=[
+            {
+                "field": "TargetImage",
+                "value": "\\lsass.exe",
+                "tier": "Tool",
+                "reason": "known_tool_name_or_cmdlet_or_exe_pattern",
+                "semantic_confidence": "high",
+            },
+            {
+                "field": "GrantedAccess",
+                "value": "0x1010",
+                "tier": "TTP",
+                "reason": "functional_constraint_field",
+                "semantic_confidence": "high",
+            },
+        ],
+        caveat=None,
+    )
+    sig = priority.RuleSignals(
+        file="rules/lsass_example.yml",
+        behavioral_commit_count=0,
+        never_revised=True,
+        days_since_behavioral_change=None,
+        age_days=900,
+        staleness_classification_confidence=None,
+        fragility=frag,
+        triage_hypotheses=[],
+    )
+    narrative = sig.narrative
+    assert "TargetImage" in narrative
+    assert "GrantedAccess" in narrative
+    assert "0x1010" in narrative
+    assert "not what set the tier" in narrative
+    assert "durable" in narrative
+    assert "cosmetic" in narrative and "not cosmetic" in narrative  # stated, and stated as a NEGATION
+
+
+def test_narrative_shows_all_tied_driving_atoms_not_just_first_two():
+    """Systematic gap the brief names directly: a MIN combination with
+    THREE atoms tied at the floor must show all three, not silently drop
+    the third the way the old `[:2]` cap did."""
+    frag = priority.FragilitySignal(
+        tier="Artifact",
+        confidence="high",
+        and_or_corrected=True,
+        unscoreable=False,
+        unscoreable_reason=None,
+        structural_findings=[],
+        structural_detail={},
+        atoms=[
+            {"field": "FieldA", "value": "a", "tier": "Artifact", "reason": "unrecognized_literal_no_known_signal", "semantic_confidence": "medium"},
+            {"field": "FieldB", "value": "b", "tier": "Artifact", "reason": "unrecognized_literal_no_known_signal", "semantic_confidence": "medium"},
+            {"field": "FieldC", "value": "c", "tier": "Artifact", "reason": "unrecognized_literal_no_known_signal", "semantic_confidence": "medium"},
+        ],
+        caveat=None,
+    )
+    sig = priority.RuleSignals(
+        file="rules/three_way_tie.yml",
+        behavioral_commit_count=0,
+        never_revised=True,
+        days_since_behavioral_change=None,
+        age_days=900,
+        staleness_classification_confidence=None,
+        fragility=frag,
+        triage_hypotheses=[],
+    )
+    narrative = sig.narrative
+    assert "FieldA" in narrative
+    assert "FieldB" in narrative
+    assert "FieldC" in narrative
+
+
+def test_narrative_flags_unrecognized_driving_atom_with_reduced_confidence():
+    """Part 2's honest floor: when the atom that sets the tier is a
+    genuinely unrecognized value (semantic_confidence medium), the
+    narrative must say mechanic doesn't recognize it - never silently
+    present it with the same confidence as a known signal."""
+    frag = priority.FragilitySignal(
+        tier="Artifact",
+        confidence="high",
+        and_or_corrected=True,
+        unscoreable=False,
+        unscoreable_reason=None,
+        structural_findings=[],
+        structural_detail={},
+        atoms=[
+            {
+                "field": "SomeDomainSpecificField",
+                "value": "an-unrecognized-value",
+                "tier": "Artifact",
+                "reason": "unrecognized_literal_no_known_signal",
+                "semantic_confidence": "medium",
+            }
+        ],
+        caveat=None,
+    )
+    sig = priority.RuleSignals(
+        file="rules/unrecognized_example.yml",
+        behavioral_commit_count=0,
+        never_revised=True,
+        days_since_behavioral_change=None,
+        age_days=900,
+        staleness_classification_confidence=None,
+        fragility=frag,
+        triage_hypotheses=[],
+    )
+    narrative = sig.narrative
+    assert "does not recognize" in narrative
+    assert "SomeDomainSpecificField" in narrative
+    assert "lower-confidence" in narrative
+
+
+def test_narrative_omits_unrecognized_sentence_for_known_high_confidence_atom():
+    """Negative check: a normal, recognized Tool-tier atom (high
+    semantic_confidence) must NOT trigger the "does not recognize"
+    sentence - that sentence is specific to the medium-confidence honest
+    floor, not shown for every rule."""
+    frag = priority.FragilitySignal(
+        tier="Tool",
+        confidence="high",
+        and_or_corrected=True,
+        unscoreable=False,
+        unscoreable_reason=None,
+        structural_findings=[],
+        structural_detail={},
+        atoms=[
+            {
+                "field": "Image",
+                "value": "mimikatz.exe",
+                "tier": "Tool",
+                "reason": "known_tool_name_or_cmdlet_or_exe_pattern",
+                "semantic_confidence": "high",
+            }
+        ],
+        caveat=None,
+    )
+    sig = priority.RuleSignals(
+        file="rules/known_tool_example.yml",
+        behavioral_commit_count=0,
+        never_revised=True,
+        days_since_behavioral_change=None,
+        age_days=900,
+        staleness_classification_confidence=None,
+        fragility=frag,
+        triage_hypotheses=[],
+    )
+    narrative = sig.narrative
+    assert "does not recognize" not in narrative
+
+
+def test_sigma_fragility_end_to_end_lsass_rule_min_lands_on_tool_not_cosmetic_mask(tmp_path: Path):
+    """End-to-end regression through priority._sigma_fragility for the full
+    LSASS hand-test: GrantedAccess must not be cited as cosmetic anywhere,
+    and the real driving atom (TargetImage) must be named."""
+    rule_path = tmp_path / "lsass_access.yml"
+    rule_path.write_text(
+        "title: Mimikatz Detection LSASS Access\n"
+        "id: 0d894093-71bc-43c3-8c4d-ecfc28dcf5d9\n"
+        "status: test\n"
+        "logsource:\n"
+        "    product: windows\n"
+        "    category: process_access\n"
+        "detection:\n"
+        "    selection:\n"
+        "        TargetImage|endswith: '\\lsass.exe'\n"
+        "        GrantedAccess:\n"
+        "            - '0x1410'\n"
+        "            - '0x1010'\n"
+        "            - '0x410'\n"
+        "    condition: selection\n"
+        "level: high\n"
+    )
+    frag = priority._sigma_fragility(rule_path)
+    assert frag.tier == "Tool"
+    granted_access = [a for a in frag.atoms if a["field"] == "GrantedAccess"]
+    assert granted_access and all(a["tier"] == "TTP" for a in granted_access)
+    sig = priority.RuleSignals(
+        file="lsass_access.yml",
+        behavioral_commit_count=0,
+        never_revised=True,
+        days_since_behavioral_change=None,
+        age_days=900,
+        staleness_classification_confidence=None,
+        fragility=frag,
+    )
+    narrative = sig.narrative
+    assert "TargetImage" in narrative
+    assert "GrantedAccess" in narrative
+    assert "durable" in narrative
+
+
 def test_deprecated_pipe_syntax_is_unscoreable_not_a_crash(tmp_path: Path):
     """Regression test for a real crash hit running triage against the full
     SigmaHQ corpus: a rule using the deprecated `condition: selection |

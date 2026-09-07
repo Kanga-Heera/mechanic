@@ -154,7 +154,16 @@ def _sigma_fragility(path: Path) -> FragilitySignal:
         # isolation, and Part 3 must not regress it. Reported as unscoreable
         # with the real exception message, not silently skipped or guessed.
         return FragilitySignal(None, "low", True, True, f"AST build/classify failed: {e}", [], {}, [], None)
-    atoms = [{"field": a.field, "value": a.value, "tier": a.tier, "reason": a.reason} for a in result.atoms]
+    atoms = [
+        {
+            "field": a.field,
+            "value": a.value,
+            "tier": a.tier,
+            "reason": a.reason,
+            "semantic_confidence": a.semantic_confidence,
+        }
+        for a in result.atoms
+    ]
     if result.unscoreable:
         return FragilitySignal(
             None, "low", True, True, "structural UNSCOREABLE: " + result.structural_detail.get("UNSCOREABLE", ""),
@@ -274,26 +283,33 @@ class RuleSignals:
                 f"is treated as the most durable (TTP) tier regardless of the literal values involved."
             )
         elif f.atoms:
-            # Show the atom(s) that actually DROVE the assigned tier, not just
-            # the first N in list order - for an AND-linked rule the tier is
-            # the MIN across atoms, so an early, higher-tier atom (e.g. an
-            # excluded EventID selector) is not what explains the result.
-            # Falls back to the first two atoms only if none match (e.g. the
-            # tier came from a SELECTOR/OR combination this simple filter
-            # doesn't reconstruct) - explicitly weaker phrasing in that case
-            # so the sentence never claims a driving atom it didn't verify.
-            driving = [a for a in f.atoms if a.get("tier") == f.tier]
-            # Prefer a real content match over a placeholder floor value (e.g.
-            # "eventid_or_syscall_data_source_selector_excluded" is a
-            # structural stand-in, not something an attacker "matches" in any
-            # meaningful sense) - sort those to the back rather than let them
-            # crowd out the atom that actually explains the tier to a reader.
-            driving.sort(key=lambda a: 1 if "excluded" in (a.get("reason") or "") else 0)
+            # Real (non-placeholder) atoms only - an
+            # "..._excluded" reason (e.g. a boilerplate EventID data-source
+            # selector) is a structural stand-in, not something an attacker
+            # "matches" in any meaningful sense, so it never appears in
+            # either half of the explanation below.
+            real_atoms = [a for a in f.atoms if "excluded" not in (a.get("reason") or "")]
+
+            # Show the atom(s) that actually SET the assigned tier - for an
+            # AND-linked (MIN) rule that's every atom tied at the floor, not
+            # just the first one found; for an OR-linked (MAX) rule it's
+            # the strongest atom(s). Falls back to the first two atoms only
+            # if none match (e.g. the tier came from a SELECTOR/OR
+            # combination this simple filter doesn't reconstruct) -
+            # explicitly weaker phrasing in that case so the sentence never
+            # claims a driving atom it didn't verify.
+            driving = [a for a in real_atoms if a.get("tier") == f.tier]
+            _MAX_SHOWN = 6  # generous for any realistic rule; capped so a
+            # pathological rule with dozens of tied atoms doesn't turn one
+            # sentence into a wall of text - the exact count past the cap
+            # is still stated, never silently dropped.
             if driving:
-                shown = driving[:2]
+                shown = driving[:_MAX_SHOWN]
+                overflow = len(driving) - len(shown)
                 verb = "The tier comes from matching on"
             else:
-                shown = f.atoms[:2]
+                shown = real_atoms[:2]
+                overflow = 0
                 verb = "Contributing values include (not necessarily the ones that set the final tier)"
             parts = []
             for a in shown:
@@ -301,19 +317,53 @@ class RuleSignals:
                 if a.get("tier"):
                     label += f" (classified {a['tier']})"
                 parts.append(label)
-            sentences.append(f"{verb}: {'; '.join(parts)}.")
+            driving_sentence = f"{verb}: {'; '.join(parts)}"
+            if overflow > 0:
+                driving_sentence += f" (+{overflow} more at the same tier)"
+            sentences.append(driving_sentence + ".")
+
+            # The REST of the basis, not just what set the final number -
+            # systematic gap found by hand-testing multi-atom rules: a
+            # MIN-combined rule's non-floor atoms (often the MORE durable
+            # ones - e.g. a functional-constraint match sitting alongside a
+            # weaker literal) were silently dropped from the explanation
+            # just because they didn't set the final tier, leaving a reader
+            # unable to tell "this durable-looking match wasn't cosmetic,
+            # it just wasn't the weakest link" from "mechanic never saw it."
+            if driving:
+                driving_ids = {id(a) for a in driving}
+                others = [a for a in real_atoms if id(a) not in driving_ids]
+                if others:
+                    shown_others = others[:_MAX_SHOWN]
+                    other_overflow = len(others) - len(shown_others)
+                    other_parts = [
+                        f"{a.get('field')}={a.get('value')!r} (classified {a.get('tier')})" for a in shown_others
+                    ]
+                    others_sentence = f"Other matched values, not what set the tier: {'; '.join(other_parts)}"
+                    if other_overflow > 0:
+                        others_sentence += f" (+{other_overflow} more)"
+                    sentences.append(others_sentence + ".")
+
+            # The two field-role explanation sentences below scan ALL real
+            # atoms, not just `shown`/`driving` - each explains WHY an atom
+            # got the tier it did, and that explanation must appear even
+            # when the atom in question isn't the one that set the rule's
+            # final tier (exactly the LSASS/GrantedAccess case: the access
+            # mask is durable and correctly NOT the floor, but a reader
+            # must still be told it isn't cosmetic, not left to assume the
+            # "other matched values" line above already covers that).
 
             # A match forced to Artifact because it's inside an
-            # attacker-authored script-content field (see
-            # fragility._SCRIPT_CONTENT_FIELD_NAMES) deserves its own
-            # sentence - the generic Artifact tier_meaning above ("a
-            # generic literal... an attacker can typically evade it with a
-            # small, cosmetic change") is true but doesn't say WHY a
-            # cmdlet/tool-shaped string here isn't Tool-tier, which is the
-            # thing worth explaining to a reader who'd otherwise expect
+            # attacker-authored-text field (see field_semantics.py's
+            # ATTACKER_AUTHORED_TEXT role) deserves its own sentence - the
+            # generic Artifact tier_meaning above ("a generic literal... an
+            # attacker can typically evade it with a small, cosmetic
+            # change") is true but doesn't say WHY a cmdlet/tool-shaped
+            # string here isn't Tool-tier, which is the thing worth
+            # explaining to a reader who'd otherwise expect
             # `Invoke-WebRequest` to look like a Tool match.
             script_content_atoms = [
-                a for a in shown if a.get("reason") == "attacker_authored_script_content_field"
+                a for a in real_atoms if a.get("reason") == "attacker_authored_script_content_field"
             ]
             if script_content_atoms:
                 fields = ", ".join(sorted({a.get("field") for a in script_content_atoms}))
@@ -322,6 +372,41 @@ class RuleSignals:
                     f"ran - matching a tool or cmdlet name inside it doesn't require an attacker to actually "
                     f"switch tools, only to reword or obfuscate the script (an alias, string concatenation, "
                     f"reflection), which is easy to do."
+                )
+
+            # A match promoted to TTP because it's inside a
+            # functional-constraint field (see field_semantics.py's
+            # FUNCTIONAL_CONSTRAINT role - the LSASS GrantedAccess case) -
+            # the mirror image of the script-content sentence above: this
+            # one exists specifically so an access-mask-style match is
+            # never left implicitly cosmetic just because it wasn't the
+            # atom that set the tier.
+            functional_constraint_atoms = [
+                a for a in real_atoms if a.get("reason") == "functional_constraint_field"
+            ]
+            if functional_constraint_atoms:
+                fields = ", ".join(sorted({a.get("field") for a in functional_constraint_atoms}))
+                sentences.append(
+                    f"The {fields} field is treated as durable (TTP tier), not cosmetic: its value is "
+                    f"dictated by what the technique actually requires (e.g. a specific access-rights "
+                    f"bitmask), not a stylistic choice an attacker made - it cannot be reworded or "
+                    f"obfuscated without forfeiting the capability being requested."
+                )
+
+            # Part 2's honest floor: if the atom(s) that actually SET the
+            # tier include one mechanic doesn't recognize at all (no known
+            # tool, protected literal, field role, or pattern matched -
+            # semantic_confidence "medium"), say so plainly rather than
+            # let the tier-meaning sentence above read as a confident claim
+            # about a value mechanic has no actual basis for.
+            unrecognized_driving = [a for a in shown if a.get("semantic_confidence") == "medium"]
+            if unrecognized_driving:
+                labels = "; ".join(f"{a.get('field')}={a.get('value')!r}" for a in unrecognized_driving)
+                sentences.append(
+                    f"mechanic does not recognize the specific meaning of {labels} - it defaults to "
+                    f"Artifact because nothing else matched, not because mechanic has confirmed this value "
+                    f"is cosmetic. Treat this tier as a lower-confidence placeholder for an unrecognized "
+                    f"value, not a verified judgment."
                 )
 
         if self.triage_hypotheses:
