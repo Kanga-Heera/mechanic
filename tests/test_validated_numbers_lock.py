@@ -7,9 +7,9 @@ if it drifts, never adjusts a tolerance or a fixture to chase a new value.
 
 What's locked here, and how:
 
-1. STP rank correlation, SIGMA-ONLY (Kendall's tau-b = 0.3117, p = 0.0052;
-   Spearman's rho = 0.3361, p = 0.0044; mapped quadratic-weighted kappa =
-   0.2821; n = 70) - against the SigmaHQ rows of the same frozen fixture
+1. STP rank correlation, SIGMA-ONLY (Kendall's tau-b = 0.2841, p = 0.0112;
+   Spearman's rho = 0.3056, p = 0.0101; mapped quadratic-weighted kappa =
+   0.2249; n = 70) - against the SigmaHQ rows of the same frozen fixture
    used by the historical combined figure (see below), re-classified with
    ONLY core code (mechanic.fragility/mechanic.ast_repr/mechanic.loader -
    no import of anything quarantined). This is the CORE's own headline
@@ -17,6 +17,19 @@ What's locked here, and how:
    docs/multiformat-experimental.md for exactly how this number relates to
    the historical 0.361 combined figure and why both are real, disclosed
    numbers rather than one silently replacing the other.
+
+   RE-PINNED by the script-content fragility fix (RESULTS.md, "Bug fix:
+   script-content field durability inversion") - was tau-b=0.3117/
+   rho=0.3361/kappa=0.2821 before that fix. 3 of the 70 rows (all
+   ScriptBlockText-based PowerShell rules, all previously Tool tier,
+   MITRE score 2) moved to Artifact tier as a DIRECT, understood
+   consequence of fixing a confirmed classification bug, not drift - see
+   RESULTS.md Part 4 for the full investigation, including MITRE's own
+   free-text justification for these exact rows ("ScriptBlockText
+   searches are ... easy to evade with everyting being within adversary
+   control"), which independently agrees with the fix. Still positive,
+   still statistically significant - re-pinned deliberately, not reverted
+   to protect the old number.
 
 2. The three mechanical-commit figures (SigmaHQ 2,931 files in one
    commit, Elastic 1,064, Splunk 2,068) - these are immutable historical
@@ -145,15 +158,16 @@ def test_stp_rank_correlation_sigma_only_locked(stp_sigma_only_reclassified: lis
     tau, tau_p = stats.kendalltau(mech_ranks, stp_scores)
     rho, rho_p = stats.spearmanr(mech_ranks, stp_scores)
 
-    assert tau == pytest.approx(0.3117, abs=0.001), f"Kendall's tau-b drifted: {tau:.4f} (was 0.3117)"
-    assert tau_p == pytest.approx(0.0052, abs=0.001), f"tau-b p-value drifted: {tau_p:.4f} (was 0.0052)"
-    assert rho == pytest.approx(0.3361, abs=0.001), f"Spearman's rho drifted: {rho:.4f} (was 0.3361)"
-    assert rho_p == pytest.approx(0.0044, abs=0.001), f"rho p-value drifted: {rho_p:.4f} (was 0.0044)"
+    assert tau == pytest.approx(0.2841, abs=0.001), f"Kendall's tau-b drifted: {tau:.4f} (was 0.2841)"
+    assert tau_p == pytest.approx(0.0112, abs=0.001), f"tau-b p-value drifted: {tau_p:.4f} (was 0.0112)"
+    assert rho == pytest.approx(0.3056, abs=0.001), f"Spearman's rho drifted: {rho:.4f} (was 0.3056)"
+    assert rho_p == pytest.approx(0.0101, abs=0.001), f"rho p-value drifted: {rho_p:.4f} (was 0.0101)"
 
 
 def test_stp_mapped_kappa_sigma_only_locked(stp_sigma_only_reclassified: list[dict]):
     """Quadratic-weighted Cohen's kappa (Mapping A: STP level 3 -> Tool),
-    Sigma-only subset - locks the 0.2821 figure."""
+    Sigma-only subset - locks the 0.2249 figure (was 0.2821 before the
+    script-content fragility fix, see RESULTS.md Part 4)."""
     cats = ["IOC", "Artifact", "Tool", "TTP"]
     cat_idx = {c: i for i, c in enumerate(cats)}
     k = len(cats)
@@ -177,7 +191,7 @@ def test_stp_mapped_kappa_sigma_only_locked(stp_sigma_only_reclassified: list[di
     expected_disagreement = (w * expected).sum()
     kappa = 1 - observed_disagreement / expected_disagreement
 
-    assert kappa == pytest.approx(0.2821, abs=0.005), f"mapped quadratic-weighted kappa drifted: {kappa:.4f} (was 0.2821)"
+    assert kappa == pytest.approx(0.2249, abs=0.005), f"mapped quadratic-weighted kappa drifted: {kappa:.4f} (was 0.2249)"
 
 
 # --- mechanical-commit figures lock -----------------------------------------
