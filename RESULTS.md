@@ -3342,3 +3342,103 @@ confirm every individual rule's stated reasoning is correct, and this bug
 is a concrete case where it wasn't, for 3 real, currently-shipping SigmaHQ
 rules, hiding inside a headline number that looked fine.
 
+# Field-aware literal classification: one mechanism, both directions
+
+The ScriptBlockText fix above was shipped as an AD HOC, single-field
+special case (`fragility.py`'s former `_SCRIPT_CONTENT_FIELD_NAMES`/
+`field_carries_script_content`). A second hand-tested rule found the SAME
+root cause in the OPPOSITE direction, confirming the ad-hoc fix was too
+narrow a mechanism for what it was actually fixing.
+
+## The two bugs, one root cause
+
+- `ScriptBlockText='Invoke-WebRequest'` scored Tool tier - wrongly
+  DURABLE (already fixed, ad hoc).
+- `GrantedAccess='0x1010'` scored Artifact tier - wrongly COSMETIC (this
+  fix). `0x1010` is `PROCESS_VM_READ | PROCESS_QUERY_(LIMITED_)INFORMATION`
+  - the exact Windows access rights LSASS credential dumping requires
+  (Microsoft's "Process Security and Access Rights" docs, the same source
+  SigmaHQ's own canonical LSASS rules cite). Changing the bit pattern
+  forfeits the access; it is not a stylistic choice.
+
+Both are the classifier deciding a literal's tier from the VALUE alone,
+when it must be decided from `(field, value)` TOGETHER - the field
+determines whether a value is a functional constraint, attacker-authored
+text, a durable binary identity, a data-source label, or a truly free
+literal. Fixed once, with a bounded, documented FIELD -> ROLE registry
+(`mechanic/field_semantics.py`, full design and provenance in
+[`docs/field-semantics.md`](docs/field-semantics.md)) instead of a second
+ad-hoc special case - the original ScriptBlockText mechanism is REMOVED
+entirely and re-expressed as one of the registry's five roles
+(`ATTACKER_AUTHORED_TEXT`), same behavior, one mechanism.
+
+Two more consequences shipped alongside the registry itself:
+
+- **The honest floor (Part 2).** When a literal matches NO known signal at
+  all, `classify_atom` no longer silently asserts "Artifact, high
+  confidence, cosmetic." It still tiers Artifact (nothing earned a higher
+  tier) but `semantic_confidence` drops to `"medium"` and the reason says
+  "unrecognized," never "cosmetic" - a deliberately separate axis from the
+  existing AST-parse-succeeded confidence field, so the two are never
+  conflated.
+- **Explanation completeness (Part 4).** Hand-testing multi-atom rules
+  found the explanation citing an arbitrary subset of atoms - e.g. citing
+  a path literal but never mentioning an accompanying `*.exe`-shaped
+  filename atom's own (different) tier, or citing only two of three atoms
+  tied at the same floor. `priority.RuleSignals.narrative` now names EVERY
+  atom tied at the tier that set the result, lists the rest with their own
+  tiers, and (new) explains a `functional_constraint_field` or
+  `attacker_authored_script_content_field` atom's role wherever it appears
+  in the rule - not only when it happens to be the driving atom.
+
+## Regression checks (must not move)
+
+The canonical FIELD_MISMATCH renamed-binary rule (`proc_creation_win_
+renamed_binary_highly_relevant.yml`) still classifies TTP - the structural
+promotion runs before any atom-level field-role logic and is untouched. A
+renamed-rundll32 FIELD_MISMATCH-shaped synthetic rule still classifies
+TTP. A plain rundll32.exe match with negated `ParentImage` exclusions
+still classifies Tool on the `Image` atom alone (negated leaves stay
+excluded from the AND/OR combination, unaffected).
+
+## STP re-validation - reported honestly, not tuned
+
+| Fixture | Metric | Before | After |
+|---|---|---:|---:|
+| Sigma-only (n=70) | tau-b / rho / kappa | 0.2841 / 0.3056 / 0.2249 | **unchanged** |
+| Combined (n=72) | tau-b (p) | 0.3449 (0.0017) | **0.3523 (0.0013)** |
+| Combined (n=72) | rho (p) | 0.3740 (0.0012) | **0.3784 (0.0010)** |
+| Combined (n=72) | mapped kappa | 0.2653 | **0.3077** |
+
+**Zero rows moved in the Sigma-only sample - checked directly (a full
+before/after tier diff across all 70 rows), not assumed.** Only one row
+uses `GrantedAccess` at all ("Direct Syscall of NtOpenProcess"), and its
+only occurrence sits inside a negated exclusion filter, already excluded
+from the AND/OR combination before and after this fix. The fix is real and
+independently tested (`tests/test_fragility.py`'s dedicated
+`FUNCTIONAL_CONSTRAINT` fixtures, `tests/test_field_semantics.py`'s
+role-resolution unit tests) but this particular external-validation sample
+has no row that exercises it.
+
+**One row moved in the combined 72-row sample, and the correlation
+IMPROVED**: the Splunk rule "Detect Credential Dumping through LSASS
+access" (MITRE score 4) moved mechanic's tier from Tool to TTP - a
+materially closer match to MITRE's own score, reached through the
+quarantined text-path classifier (`mechanic.experimental.multiformat.
+text_fragility`), which shares `fragility.classify_atom` with the core
+Sigma path and so inherited the fix automatically. This is the one real
+row in either sample that actually exercises an access-mask-shaped field,
+and it independently confirms the fix's direction.
+
+Per the brief: neither result changed what was implemented, before or
+after computing it. The fix is justified by the evasion-semantics argument
+(a bitmask value is dictated by the technique, not chosen by the attacker)
+independently of any correlation number - the STP re-run is a check,
+reported plainly whichever way it moved (a drop for the first fix, an
+improvement for this one), never a target tuned toward. Both frozen-fixture
+locks (`tests/test_validated_numbers_lock.py`,
+`tests/experimental/test_multiformat_validated_numbers_lock.py`) are
+re-pinned to the numbers above, with the zero-movement finding documented
+in the Sigma-only lock's own docstring rather than left unstated just
+because "nothing changed" has less to report than a number that moved.
+

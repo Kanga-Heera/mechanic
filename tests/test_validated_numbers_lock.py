@@ -31,6 +31,22 @@ What's locked here, and how:
    still statistically significant - re-pinned deliberately, not reverted
    to protect the old number.
 
+   NOT MOVED by the later field-semantics registry fix (RESULTS.md,
+   "Field-aware literal classification" / docs/field-semantics.md - the
+   GrantedAccess/FUNCTIONAL_CONSTRAINT fix). Checked directly, not
+   assumed: re-classified all 70 rows before and after that fix and
+   diffed every tier - zero rows changed. Only one row in the 70-row
+   Sigma-only sample even uses GrantedAccess ("Direct Syscall of
+   NtOpenProcess"), and its only occurrence is inside a negated exclusion
+   filter (`not 1 of falsepositive*`), already excluded from the AND/OR
+   combination entirely before and after this fix - so the fix is real
+   and correct (see tests/test_fragility.py's dedicated
+   FUNCTIONAL_CONSTRAINT fixtures) but has no row in THIS sample to move.
+   The historical combined 72-row lock
+   (tests/experimental/test_multiformat_validated_numbers_lock.py) DID
+   move - one Splunk rule (reached only through the quarantined text-path
+   classifier, not this file) exercises the fixed path and moved tau-b up.
+
 2. The three mechanical-commit figures (SigmaHQ 2,931 files in one
    commit, Elastic 1,064, Splunk 2,068) - these are immutable historical
    facts (a specific past commit touched N files), not time-relative, so

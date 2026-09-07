@@ -1,6 +1,6 @@
 """The historical COMBINED (SigmaHQ + Elastic + Splunk) STP correlation
-lock - Kendall's tau-b = 0.3449 (p = 0.0017), Spearman's rho = 0.3740
-(p = 0.0012), mapped quadratic-weighted kappa = 0.2653, n = 72 -
+lock - Kendall's tau-b = 0.3523 (p = 0.0013), Spearman's rho = 0.3784
+(p = 0.0010), mapped quadratic-weighted kappa = 0.3077, n = 72 -
 RESULTS.md's "The AND/OR fix, implemented, and everything re-run".
 
 This is EXACTLY `tests/test_validated_numbers_lock.py`'s STP section before
@@ -15,14 +15,33 @@ number look better or worse; it is the same frozen fixture and the same
 classification code (now living under mechanic.experimental.multiformat)
 that always produced it.
 
-RE-PINNED by the script-content fragility fix (RESULTS.md, "Bug fix:
-script-content field durability inversion") - was tau-b=0.361/rho=0.392/
-kappa=0.316 before that fix. 3 of the 70 SigmaHQ rows in this 72-row sample
-(all ScriptBlockText-based PowerShell rules, all previously Tool tier,
-MITRE score 2) moved to Artifact tier as a direct, understood consequence
-of fixing a confirmed classification bug - see RESULTS.md Part 4 for the
-full investigation. Still positive, still statistically significant -
-re-pinned deliberately, not reverted to protect the old number.
+RE-PINNED TWICE, both times by a confirmed classification-bug fix, never by
+chasing the number:
+
+  1. The script-content fragility fix (RESULTS.md, "Bug fix: script-content
+     field durability inversion") - was tau-b=0.361/rho=0.392/kappa=0.316
+     before. 3 of the 70 SigmaHQ rows in this 72-row sample (all
+     ScriptBlockText-based PowerShell rules, all previously Tool tier,
+     MITRE score 2) moved to Artifact tier - see RESULTS.md Part 4. The
+     correlation DROPPED (tau 0.361 -> 0.3449) as a real, investigated
+     consequence, not reverted to protect the old number.
+  2. The field-semantics registry fix (RESULTS.md, "Field-aware literal
+     classification" / docs/field-semantics.md) - was tau-b=0.3449/
+     rho=0.3740/kappa=0.2653 before. Exactly ONE row in this 72-row sample
+     moved: the Splunk rule "Detect Credential Dumping through LSASS
+     access" (MITRE score 4, mechanic Tool -> TTP) - a GrantedAccess-style
+     access-mask field, previously scored as an ordinary unrecognized
+     literal (Artifact-pulling-the-rule-to-Tool via its weaker co-atoms),
+     now correctly treated as a durable functional constraint. This time
+     the correlation IMPROVED (tau 0.3449 -> 0.3523, kappa 0.2653 -> 0.3077)
+     - reported plainly, same as the drop was, because the brief's rule is
+     "report honestly," not "report only improvements."
+
+Zero SigmaHQ rows in the 70-row Sigma-only sample changed tier from fix #2
+(see tests/test_validated_numbers_lock.py's own note) - only the ONE
+Splunk row (reached exclusively through the quarantined text-path
+classifier this file exists to lock) exercises the FUNCTIONAL_CONSTRAINT
+path in either external-validation sample.
 """
 
 from __future__ import annotations
@@ -142,17 +161,18 @@ def test_stp_rank_correlation_locked(stp_reclassified: list[dict]):
     tau, tau_p = stats.kendalltau(mech_ranks, stp_scores)
     rho, rho_p = stats.spearmanr(mech_ranks, stp_scores)
 
-    assert tau == pytest.approx(0.3449, abs=0.001), f"Kendall's tau-b drifted: {tau:.4f} (was 0.3449)"
-    assert tau_p == pytest.approx(0.0017, abs=0.0005), f"tau-b p-value drifted: {tau_p:.4f} (was 0.0017)"
-    assert rho == pytest.approx(0.3740, abs=0.001), f"Spearman's rho drifted: {rho:.4f} (was 0.3740)"
-    assert rho_p == pytest.approx(0.0012, abs=0.0005), f"rho p-value drifted: {rho_p:.4f} (was 0.0012)"
+    assert tau == pytest.approx(0.3523, abs=0.001), f"Kendall's tau-b drifted: {tau:.4f} (was 0.3523)"
+    assert tau_p == pytest.approx(0.0013, abs=0.0005), f"tau-b p-value drifted: {tau_p:.4f} (was 0.0013)"
+    assert rho == pytest.approx(0.3784, abs=0.001), f"Spearman's rho drifted: {rho:.4f} (was 0.3784)"
+    assert rho_p == pytest.approx(0.0010, abs=0.0005), f"rho p-value drifted: {rho_p:.4f} (was 0.0010)"
 
 
 def test_stp_mapped_kappa_locked(stp_reclassified: list[dict]):
     """Quadratic-weighted Cohen's kappa (Mapping A: STP level 3 -> Tool)
     against mechanic's tier, same weighting stp_stats.py (the original
-    analysis) used - locks the 0.2653 figure (was 0.316 before the
-    script-content fragility fix, see RESULTS.md Part 4)."""
+    analysis) used - locks the 0.3077 figure (0.2653 after the
+    script-content fragility fix, 0.316 before that - see this module's
+    own docstring for the field-semantics fix that produced this figure)."""
     cats = ["IOC", "Artifact", "Tool", "TTP"]
     cat_idx = {c: i for i, c in enumerate(cats)}
     k = len(cats)
@@ -176,4 +196,4 @@ def test_stp_mapped_kappa_locked(stp_reclassified: list[dict]):
     expected_disagreement = (w * expected).sum()
     kappa = 1 - observed_disagreement / expected_disagreement
 
-    assert kappa == pytest.approx(0.2653, abs=0.005), f"mapped quadratic-weighted kappa drifted: {kappa:.4f} (was 0.2653)"
+    assert kappa == pytest.approx(0.3077, abs=0.005), f"mapped quadratic-weighted kappa drifted: {kappa:.4f} (was 0.3077)"
