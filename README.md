@@ -1,559 +1,292 @@
 # mechanic
 
-Detection rule maintenance triage.
+Detection rule maintenance triage — tells you which of your Sigma detection
+rules are weak (easy for an attacker to slip past) or stale (nobody's kept
+them up to date), so you know which ones to look at first.
 
-**Status, plainly, no spin:** the CORE product is a **Sigma** detection-rule
-triage tool — a fault-isolated rule loader, a git-driven behavioral
-staleness engine (format-agnostic: also runs on Elastic/Splunk repos, see
-below), and a structural fragility classifier externally validated against
-MITRE Center for Threat-Informed Defense's Summiting the Pyramid
-methodology (Kendall's tau-b = 0.3117, p = 0.0052 against MITRE's own
-human-expert-scored analytics, Sigma-only — see `RESULTS.md` and
-`docs/multiformat-experimental.md`). This scope is a deliberate strength,
-not an apology: Sigma is the one format this project has a real AST for,
-so it's the only one where the STP-validated structural detectors and
-AND/OR combination logic actually run — the classifier is validated on
-exactly the format where that validation holds, and says so plainly rather
-than quietly extending the same confidence level to formats it hasn't
-earned it on.
+## What this is
 
-It fills a gap nothing else in the space fills: alert triage is a crowded
-field, but *rule* triage (telling an engineer which detection rules are
-fragile and/or stale and therefore need attention first, at repository
-scale) is not. It runs `scan`/`staleness`/`triage`/`explain` with zero
-dependency on RSigma, zero network access, and no API key, enforced by a
-test (`docs/core-vs-experiment.md`, `tests/test_core_isolation.py`) — see
-`QUICKSTART.md` for five real commands against a real SigmaHQ checkout.
+The core tool does three things:
 
-Two things are explicit, honest future work rather than gaps quietly left
-unaddressed:
+1. **Loads a folder of Sigma rules without crashing** on the bad/malformed
+   files real-world rule repos always have a few of.
+2. **Checks each rule's real git history** to see if it's actually been
+   maintained — not just counting commits, since a single bulk reformat can
+   touch thousands of files and make a repo look far more "active" than it is.
+3. **Scores how easy each rule is to bypass**, based on the rule's actual
+   logic (parsed into a real tree), not just text matching. This score is
+   checked against MITRE's own "Summiting the Pyramid" methodology, using
+   MITRE's own expert-scored data (Kendall's tau-b = 0.3117, p = 0.0052 —
+   full numbers in `RESULTS.md`).
 
-- **Elastic/Splunk structural fragility** — a regex-approximated,
-  medium-confidence classification exists and is kept, working, and
-  tested, but quarantined out of the core into
-  `mechanic/experimental/multiformat/` because it cannot clear the same
-  AST-validated bar Sigma's classifier does — see
-  `docs/multiformat-experimental.md` for exactly what's there and why. The
-  concrete path back to core status: a real KQL parser
-  ([kibana-ql](https://github.com/elastic/kibana), used by Kibana itself)
-  would let Elastic's structural detectors and AND/OR combination run for
-  real and be re-validated against STP on its own merits. EQL and SPL are
-  harder — no equivalently mature, permissively-licensed Python parser
-  identified as of this writing — and stay unparsed for now.
-- **Rule repair** — a separate, later Stage 3 experiment asked whether a
-  fragile rule can be *repaired* automatically and verified by a real
-  detection engine rather than an LLM's own say-so; that experiment is
-  complete and its honestly-measured result (a 3.6% acceptance rate, 1 of
-  28 sampled rules, independence-audited — see `RESULTS.md`'s Stage 3
-  Phase 3 section) is a real finding worth keeping, but it is **not** part
-  of the core product and is quarantined into its own module tree and its
-  own `mechanic-repair` CLI so its presence, correctness, or failure can
-  never affect the core's reliability.
+The bypass-difficulty score is only fully trusted for **Sigma** rules, on
+purpose — Sigma is the only format this tool can parse into a real logic
+tree, so it's the only format where that score has actually been validated.
+A rougher, lower-confidence version exists for Elastic and Splunk rules too,
+but it's kept in a separate folder (`mechanic/experimental/multiformat/`)
+and never mixed into the main results — see `docs/multiformat-experimental.md`.
 
-This project was originally scoped and built in three stages; the sections
-below still describe Stage 1's infrastructure (loader, staleness, AST) in
-detail, with Stage 2's fragility classifier and Stage 3's repair experiment
-covered in `RESULTS.md` and the `docs/` status documents. It does **not**
-judge ATT&CK coverage or claim to catch every possible evasion — see
-`RESULTS.md` for every disclosed limitation, not just the ones repeated
-here.
+Runs fully offline: no network calls, no API key, enforced by an automated
+test (`tests/test_core_isolation.py`). See `QUICKSTART.md` for five real
+commands to try against a real SigmaHQ checkout.
 
-**Mechanic measures:**
-- staleness (git-driven organic-revision behavior — `churn.py`/`semantic_diff.py`; format-agnostic, any of the four registered rule formats)
-- structural fragility, **Sigma-only in the core** (`fragility.py`/`structural_detectors.py`, STP-validated) — Elastic/Splunk's medium-confidence approximation lives in the quarantined `mechanic/experimental/multiformat/` (see `docs/multiformat-experimental.md`), never blended into core output
-- a review-priority ORDERING derived from those two axes (`priority.py`) — never a fused/weighted score (see Part 3 in `RESULTS.md`)
+One gap is left open on purpose rather than hidden: Elastic/Splunk bypass
+scoring won't reach the same confidence level until this project has a real
+parser for those formats (Elastic's own KQL parser is the likely path;
+Splunk's query language has no equivalent yet).
 
-**Mechanic does NOT measure:**
-- event robustness (MITRE STP's separate analytic-robustness axis — mechanic's apparent weak correlation with it is coincidental field overlap, not a real second dimension; see RESULTS.md's Task 7 correlation experiment). Not on the roadmap for this stage — stated as a genuine scope boundary, not a gap accidentally left unfilled.
-- ATT&CK technique-proximity/coverage
-- evadability against a specific, real adversary (a manual/academic exercise, not what repository-scale triage can claim)
-- validated Elastic/Splunk fragility — the core refuses to score these formats at all (`mechanic triage --fmt elastic_toml` errors cleanly rather than producing a tier); see `docs/multiformat-experimental.md` for the quarantined, lower-confidence work that exists outside the core
+*Historical note:* an earlier, separate experiment tried automatically
+*repairing* weak rules and verifying the fix with a real detection engine.
+It ran to completion (a 3.6% acceptance rate, 1 of 28 sample rules) but was
+never part of the core tool, and its code has since been removed from this
+repository.
+
+**Mechanic checks:**
+- **Staleness** — is the rule actually maintained? (`churn.py`, works on any
+  of the four supported rule formats)
+- **Fragility** — how easy is the rule to bypass? (`fragility.py`, Sigma
+  only in the core, validated against MITRE STP)
+- **A review-priority ordering** built from those two (`priority.py`) —
+  shown side by side, never combined into one number (see below for why)
+
+**Mechanic does NOT check:**
+- ATT&CK technique coverage or mapping quality
+- Whether a rule would survive a specific, real attacker (that needs a
+  manual test, not a repo-wide scan)
+- Elastic/Splunk fragility at the same confidence as Sigma — the core tool
+  refuses those formats outright (`mechanic triage --fmt elastic_toml`
+  fails cleanly rather than guessing)
 
 ## Why this exists
 
-Two things fell out of prior investigation into pySigma/sigma-cli and five
-real-world rule repositories:
+Two problems, found while testing this against five real rule repositories:
 
-1. **`SigmaCollection.load_ruleset()` is not fault-tolerant.** It has no
-   defensive coding around parsing untrusted YAML into a rule object: one
-   malformed file kills the whole batch, and even its own `collect_errors`
-   mode only catches `SigmaError` subclasses — not the `AttributeError`s and
-   `TypeError`s that real-world rules actually trigger (a bare-int `id:`, a
-   malformed correlation-rule document, a null date field). A second,
-   independent crash class happens *after* successful parsing, during
-   validation (a null `references:` entry blowing up a validator's
-   `re.match()` call) — so isolation has to wrap the load step **and** every
-   individual validator call, not just the load.
-2. **Raw git commit counts are useless for measuring rule maintenance.**
-   Mass mechanical commits (bulk reformats, metadata migrations, CI
-   housekeeping) dominate them. The largest single commits observed:
-   SigmaHQ 2,931 files, Splunk 2,073, Elastic 1,064 — each in one commit.
+1. **Sigma's own parsing library isn't crash-resistant.** One malformed
+   file (a bad ID field, a broken date, a malformed correlation rule) can
+   kill the whole batch load — and the library's built-in error handling
+   doesn't catch every kind of crash real-world files trigger.
+2. **Counting git commits doesn't tell you if a rule is maintained.** Big
+   repos run mass mechanical commits — bulk reformats or metadata
+   migrations touching thousands of files at once (SigmaHQ: 2,931 files in
+   a single commit). Those swamp any real signal about which rules people
+   actually revise.
 
-`mechanic` addresses both, plus builds the AST substrate a later
-classification stage will need.
+`mechanic` fixes both: it won't crash on bad files, and it filters out
+mechanical noise before measuring how well-maintained a rule really is.
+
+## How it works
+
+```mermaid
+flowchart TD
+    A["Sigma YAML rule"] --> B["loader.py<br/>parse into a logic tree<br/>(never crashes the whole batch)"]
+
+    B --> C["fragility.py<br/>look at each field = value condition"]
+    B --> F["churn.py + semantic_diff.py<br/>look at git history"]
+
+    subgraph FRAG ["Fragility check"]
+        C --> D["field_semantics.py<br/>what ROLE does this field play?<br/>(identity / attacker-written text /<br/>required-by-the-OS / just a log-source label / unknown)"]
+        D --> E["protected_literals.py + refdata.py<br/>check the value against known patterns<br/>-> tier: IOC / Artifact / Tool / TTP"]
+        E --> G["combine per condition:<br/>AND = weakest link, OR = strongest link"]
+    end
+
+    subgraph STALE ["Staleness check"]
+        F --> H["real edits vs.<br/>bulk/mechanical commit noise"]
+    end
+
+    G --> I["priority.py<br/>turn the scores into a plain-English explanation"]
+    H --> I
+    I --> J["cli.py<br/>scan / staleness / triage / explain"]
+```
+
+Two independent checks feed one output: **fragility** (how easy is this
+rule to bypass) and **staleness** (has this rule actually been maintained).
+`priority.py` is the only place they come together — and even there, they
+stay two separate numbers shown side by side, never merged into one score
+(see "Priority / triage" below for why).
 
 ## Components
 
-### 1. Fault-isolated rule loader (`mechanic/loader.py`, `mechanic/categories.py`)
+### 1. A rule loader that doesn't crash (`mechanic/loader.py`, `mechanic/categories.py`)
 
-Two layers of isolation:
+Two layers of safety:
 
-- **Per-file** try/except around YAML parsing and `SigmaRule`/
-  `SigmaCorrelationRule` construction. A crash on one document does not stop
-  the batch; a crash on one document in a multi-document file does not stop
-  the other documents in that file.
-- **Per-rule-per-validator** try/except around every `validator.validate(rule)`
-  call. A validator that crashes on one rule (e.g. the SigmaHQ github-link
-  validator dying on a null `references:` entry) doesn't take down validation
-  for every other rule.
+- **Per file** — if one file fails to parse, the rest of the batch keeps
+  going, and a crash in one document of a multi-document file doesn't stop
+  the other documents in it.
+- **Per rule, per validator** — if a specific validator crashes on one
+  rule, every other rule still gets validated normally.
 
-Every failure becomes a structured `FailureRecord`: file, stage
-(`yaml_parse` / `rule_construct` / `validate`), category, exception type,
-message, line number (where recoverable — PyYAML errors carry a `problem_mark`;
-most `AttributeError`/`TypeError` crashes don't have a YAML line to point at),
-and a fix hint. Seven categories are built in (see below); anything else falls
-into an `uncategorized_<ExceptionType>` bucket so it's still captured and
-never silently swallowed or allowed to crash the run.
+Every failure is recorded: which file, what stage it failed at, what
+category of problem it was, the exact error, and (where possible) a
+suggested fix. Seven known problem categories are built in; anything else
+still gets captured under an "uncategorized" bucket instead of being
+silently dropped.
 
-**Categories are pluggable two ways**, both in `categories.py`:
+| category | trigger |
+|---|---|
+| `bare_int_id` | `id:` is a plain number instead of a UUID |
+| `correlation_as_standard_rule` | `correlation:` key exists but isn't formatted correctly |
+| `yaml_scanner_error` | Bad YAML syntax (tabs, bad tokens) |
+| `yaml_composer_error` | An unquoted value starting with `*` gets misread as a YAML alias |
+| `yaml_parser_error` | Malformed YAML block structure |
+| `null_date_split` | `date:`/`modified:` field is present but empty |
+| `null_reference_typeerror` | An empty entry in `references:` crashes the link-checker |
 
-- `PREFLIGHT_CHECKS` — deterministic, version-independent structural checks
-  run on the raw parsed YAML dict *before* pySigma ever sees it (bare-int
-  `id`, null date fields, a malformed `correlation:` value). These don't
-  depend on pySigma's internal exception text, which can change across
-  versions.
-- `REGISTRY` — reactive exception-pattern matchers, used as a fallback when
-  no preflight check caught the problem, or for failures that only manifest
-  once pySigma is actually running (YAML syntax errors, validator crashes).
+New categories can be added just by appending to a list — nothing in the
+loader itself needs to change.
 
-Adding a new category means appending to one of these two lists. Nothing in
-`loader.py` changes.
+`mechanic scan <repo>` runs all of this and always gives you a clean
+summary — never a raw crash — no matter how messy the input is.
 
-Built-in categories:
+### 2. Staleness (`mechanic/churn.py`)
 
-| category | stage | trigger |
-|---|---|---|
-| `bare_int_id` | rule_construct | `id:` is a bare YAML int; pySigma calls `UUID(id)` and dies |
-| `correlation_as_standard_rule` | rule_construct | `correlation:` key present but its value isn't a mapping |
-| `yaml_scanner_error` | yaml_parse | PyYAML `ScannerError` (tabs, bad tokens) |
-| `yaml_composer_error` | yaml_parse | PyYAML `ComposerError` — usually an unquoted value starting with `*`, read as a YAML alias |
-| `yaml_parser_error` | yaml_parse | PyYAML `ParserError` (malformed block structure) |
-| `null_date_split` | rule_construct | `date:`/`modified:` present but null; pySigma calls `.split()` on it |
-| `null_reference_typeerror` | validate | a null entry in `references:` crashes the SigmaHQ github-link validator's `re.match()` |
+Reads git history directly (via `pydriller`, no manual git parsing).
+Before computing anything, it filters out **mechanical commits** — any
+single commit that touches 10%+ of all rule files at once, since that's a
+bulk reformat or migration, not a real edit. That 10% threshold can be
+changed with `--mechanical-threshold`, and every run also reports the
+numbers at 5%, 10%, and 20% side by side so the choice is never a black box.
 
-`mechanic scan <repo>` runs both layers and exits cleanly with a summary
-instead of a traceback, no matter how broken the input is.
+For each rule, after filtering out the noise, it reports: how many real
+edits it's had, when the last real edit was, how long ago that was, whether
+it's ever been revised at all, and how many different people have touched
+it.
 
-### 2. Staleness / organic churn (`mechanic/churn.py`)
+**One honest limitation:** if a rule was first added as part of a bulk
+commit (very common — that's how most of these repos onboarded their first
+few thousand rules) and then edited exactly once since, it looks identical
+in the data to a rule that was added normally and never touched again —
+both show "1 real commit." There's no way to tell those two cases apart
+from git history alone, and this tool says so rather than guessing.
 
-All git access goes through `pydriller.Repository`; no subprocess git, no
-manual `git log` parsing.
+It also refuses to give you a wrong number instead of an honest failure:
+a shallow git clone (truncated history) or a repo with no git history at
+all makes it stop and tell you, rather than silently reporting staleness
+figures that are too low.
 
-**Mechanical-commit filtering**, before any statistic is computed:
+### 3. Turning a rule into a logic tree (`mechanic/ast_repr.py`)
 
-1. Compute the current rule count `N` (via `discover_files`).
-2. Exclude any commit that touches `>= threshold * N` rule files (default
-   `threshold = 0.10`, configurable via `--mechanical-threshold`).
-3. Report every excluded commit (hash, subject, file count) so the filter is
-   auditable, not a black box.
-4. Report exclusion results at 5%, 10%, and 20% simultaneously (`sensitivity`
-   in the JSON output / the "Threshold sensitivity" table), so the choice of
-   default can't be dismissed as cherry-picked — you can see how much the
-   excluded set changes as the threshold moves.
+Every loaded rule is converted into a tree: AND/OR/NOT as structure, and
+`field = value` pairs as the leaves, each one correctly marked as negated
+or not — so a condition buried inside something like `not (a or b)` is
+still flagged correctly, no matter how deeply nested it is. This reuses
+Sigma's own official parser rather than a hand-written one, so it stays
+correct as the Sigma format itself evolves.
 
-**Why 10%?** It's a round number picked to be well above the size of a
-normal single-rule-tuning commit (touches 1 file) or a small coordinated
-edit (a handful of related rules), and well below the size of the bulk
-mechanical commits actually observed (which touch 30–100% of the corpus in
-one shot). The sensitivity table exists specifically so this isn't just
-taken on faith — see RESULTS.md for how much the excluded set shifts between
-5% and 20% on each of the five validation repos.
-
-Per-rule metrics after filtering: organic commit count, last organic commit
-date, days since, an `ever_revised` flag, distinct author count. Renamed
-files are followed across their whole history (rename edges collected from
-`ModifiedFile.change_type == RENAME` during the one required traversal, then
-resolved to each current file's canonical identity in pure Python — no
-per-file `git log --follow` calls, which would not scale to a repo with
-thousands of rule files).
-
-**A known, documented limitation**: `ever_revised` is computed purely from
-*organic* commits (`organic_commit_count > 1`). If a rule's creation commit
-was itself part of a mass mechanical commit (common — that's exactly how
-SigmaHQ/Splunk/Elastic onboarded large batches of rules at once) and it was
-later tuned exactly once, organic history shows only 1 commit and
-`ever_revised` reads `False` — even though a real edit happened. There is no
-way to distinguish "created organically, never touched again" from "created
-mechanically, revised exactly once" using only the organic commit stream;
-both leave a count of 1. This is called out rather than smoothed over.
-
-**Failure modes that are surfaced, not silently wrong**:
-
-- **Shallow clone.** Detected via `.git/shallow`. A shallow clone's truncated
-  history would silently understate every organic-commit count and every
-  staleness figure — `mechanic` refuses to compute staleness at all and tells
-  you to `git fetch --unshallow`.
-- **No git history.** No `.git` directory, or zero commits — fails clearly
-  rather than reporting an empty/zero staleness table.
-
-**Performance note**: PyDriller's own `Commit.modified_files` hardcodes
-`create_patch=True` in its underlying GitPython diff call, which computes
-full unified-diff text for every file in every commit — the dominant cost on
-a large repo, and unnecessary here since only `.old_path`/`.new_path`/
-`.change_type` are ever read (all three come straight off diff/rename
-metadata, none need patch text). `churn.py` builds the same `ModifiedFile`
-objects PyDriller would, from the same underlying commit diff, just without
-requesting patch generation — a large, correctness-neutral speedup, not a
-bypass of PyDriller's history-mining logic. `pydriller.metrics.process.
-CommitsCount` is still used for a contrast "raw commit-touch volume" figure,
-bounded to a trailing 365-day window so it stays cheap regardless of total
-repo history length — it's illustrative context only, never an input to any
-staleness computation.
-
-### 3. Rule AST (`mechanic/ast_repr.py`)
-
-Converts a successfully-loaded rule into a syntax-independent tree:
-selections/filters as named nodes, AND/OR/NOT as structure, `field`/
-`operators`/`value` triples as leaves, and an explicit `negated` polarity
-flag on every node (computed as the ambient ancestor NOT-count XORed with
-each detection item's own `negated` flag, so a leaf under `not (a or b)`
-reads `negated: true` regardless of how many ORs sit between it and the
-`not`). `logsource` and ATT&CK tags are carried as rule-level metadata.
-
-Rather than hand-writing a condition-string grammar, this reuses pySigma's
-own pyparsing-based parser (`sigma.conditions`) and its `SigmaDetection`/
-`SigmaDetectionItem` structures — specifically the *non*-postprocessed parse
-tree (`SigmaCondition.parse(postprocess=False)`), so named selections stay
-intact as nodes instead of being fully inlined, then converts that into a
-small, stable, JSON-safe dict shape (see `mechanic ast <file>` / the JSON
-schema below). A small traversal API (`iter_leaves`, `iter_selections`,
-`is_negated`) sits on top.
-
-**Prior art**: ARMS (Ghaffarzadegan, Concordia MASc thesis, April 2026) also
-converts Sigma rules to an AST, for mutation-based rule testing. Same
-conversion idea; different purpose (this AST is meant as the classification
-substrate for Stage 2's maintenance-triage work) and an independent
-implementation.
-
-Correlation rules (`correlation:` documents) have no detection tree — they
-reference other rules by id/name — and are represented minimally
-(`{"type": "correlation", "id": ..., "title": ...}`).
-
-### 4. CLI (`mechanic/cli.py`)
+### 4. Command line (`mechanic/cli.py`)
 
 ```
-mechanic scan <path>        # load report + failure diagnosis
+mechanic scan <path>        # load report + what broke
 mechanic staleness <path>   # staleness report
-mechanic ast <file>         # dump one rule's AST
-mechanic report <path>      # scan + staleness combined
+mechanic ast <file>         # see one rule's logic tree
+mechanic report <path>      # scan + staleness together
 ```
 
-Common options: `--json` (machine-readable, all commands), `--top N`
-(stalest N rules), `--fmt` (rule format — see `mechanic/discovery.py`),
-`--mechanical-threshold`, `--subdir` (restrict a repo to a subdirectory for
-staleness, e.g. SigmaHQ's `rules/` while excluding `rules-emerging-threats/`
-etc. — the git root stays at the repo root pydriller needs).
+Useful flags: `--json` (machine-readable output, every command), `--top N`
+(show only the N stalest rules), `--fmt` (which rule format), 
+`--mechanical-threshold` (staleness sensitivity), `--subdir` (only look at
+part of a repo).
 
-Rule-file discovery (`mechanic/discovery.py`) is format-agnostic and
-pluggable — **`staleness`** works on any rule-file repo (Elastic's TOML,
-Splunk's YAML), not just Sigma. `scan`/`ast`/`triage`/`explain`/`report`
-are **Sigma-only**: `scan`/`ast` because Sigma is the only format this
-codebase has a real parser for; `triage`/`explain`/`report` because
-fragility/tiering/priority need that same real parser to earn their
-external-validation bar — see `docs/core-vs-experiment.md`, "The
-staleness-vs-fragility scoping decision", and
-`docs/multiformat-experimental.md` for the quarantined Elastic/Splunk
-fragility work this excludes.
+`staleness` works on any supported rule format (Sigma, Elastic, Splunk).
+Everything that needs real parsing — `scan`, `ast`, `triage`, `explain`,
+`report` — is Sigma-only, because Sigma is the only format with a real
+parser here.
 
-### 5. Priority / triage (`mechanic/priority.py`, Stage 3 / Part 3)
+### 5. Priority / triage (`mechanic/priority.py`)
 
 ```
-mechanic triage <path>   # review-priority ordering, staleness + fragility side by side
-mechanic explain <file>  # why one rule sits where it does
+mechanic triage <path>   # staleness + fragility, side by side, sorted for review
+mechanic explain <file>  # plain-English explanation for one specific rule
 ```
 
-**This does not compute a combined score, and that is a finding, not a
-missing feature.** Part 3's original premise was that behavioral staleness
-(Part 1) and fragility tier (Part 2) should be fused into one weighted
-priority number, conditional on a pre-registered correlation experiment
-(Task 7, see RESULTS.md's "Part 3 (pre-work)" section) actually finding an
-association between the two that survives an age control. It didn't:
-SigmaHQ (the one corpus with externally-validated tiers) shows no
-meaningful association at all, and Elastic shows a real one that survives
-age-stratification but runs in the direction that argues AGAINST combining
-the signals, not for it. Per the interpretation fixed in advance, this
-means: two independent axes, not a combined score. No `--weight` flag
-exists here because Task 7 found no statistical basis for one — adding a
-configurable weight over an association that isn't there (or runs
-backwards) would manufacture false precision, not add flexibility.
+**On purpose, this does not compute one combined score — that's a finding,
+not a missing feature.** The original plan was to merge staleness and
+fragility into one weighted priority number. A dedicated experiment testing
+whether the two actually move together found no meaningful relationship in
+the one dataset with real validated fragility scores (SigmaHQ), and a real
+relationship in another (Elastic) that runs the wrong direction to justify
+combining them. So instead of inventing a formula the data doesn't support,
+`triage` reports both numbers side by side, sorted by fragility first (the
+only axis that's externally validated) with staleness as a tie-break.
 
-What `triage` actually does:
+Other things `triage`/`explain` do:
+- Put every unscoreable rule in its own section, with the specific reason —
+  never guess a tier for a rule mechanic can't actually assess.
+- Suggest loose, labeled-as-untested hypotheses (`likely-repairable`,
+  `likely-needs-telemetry-check`, `likely-retire`) from simple threshold
+  rules — never presented as a verdict on any individual rule.
+- `mechanic explain <file>` writes a few plain-English sentences on what's
+  actually going on with that one rule, then shows the full detail
+  underneath for anyone who wants to check the reasoning against the raw
+  data.
+- Git history is cached to disk, so re-running `triage`/`explain` — or
+  trying a few different threshold values — doesn't re-scan the whole
+  repo's history every time.
 
-- Runs staleness + fragility once per rule, using `--mechanical-threshold`
-  (same parameter, same default, same justification as Section 2 above —
-  it is not re-derived for Part 3, since it is the same commit-classification
-  boundary).
-- Sorts for **scanning convenience only** — fragility tier first (the only
-  axis with any external validation, via STP), then never-revised/staleness
-  as a tie-break — explicitly labelled in the CLI output as not a validated
-  score.
-- Reports every rule's fragility **confidence**, propagated from Part 2:
-  `high` for every rule `triage`/`explain` score, since the core is
-  Sigma-only and every tier comes from Sigma's AST path (AND/OR-corrected
-  against STP). A `medium`-confidence, `caveat`-carrying tier is possible in
-  the `FragilitySignal`/`RuleSignals` shape itself (`caveat`/
-  `and_or_corrected`/`lower_confidence` fields, rendered by
-  `RuleSignals.narrative` whenever present) — it's just never produced by
-  the core anymore, only by the quarantined
-  `mechanic.experimental.multiformat.triage.compute_multiformat_triage`
-  (see `docs/multiformat-experimental.md`), which reuses this exact same
-  rendering.
-- Puts every unscoreable rule in its own section (`unscoreable` in
-  `--json`), each with the specific reason (`UNSCOREABLE` structural
-  detector, insufficient information, failed to parse, no query/search
-  text) — never defaulted into a tier.
-- Offers **triage hypotheses** (`likely-repairable`, `likely-needs-
-  telemetry-check`, `likely-retire`) from simple, documented, arbitrary
-  threshold combinations of the two axes (`mechanic/priority.py::_hypotheses`)
-  — labelled as Stage 3 hypotheses to be tested in later work, never as
-  conclusions, and never as a verdict on an individual rule. `mechanic
-  explain` and every table header say "review this," not "this is bad."
+**Priority labels (CRITICAL/HIGH/MEDIUM/LOW)** come from a fixed lookup
+table combining the two scores — never a hidden formula. Run
+`mechanic priority-legend` any time to see the exact table, no repo needed.
 
-`mechanic explain <file>` auto-detects the git repository above `<file>`
-and re-runs the same full-corpus computation `triage` uses (so numbers are
-always consistent between the two commands), then prints that one rule's
-signals - leading with a **prose narrative** (`RuleSignals.narrative`), not
-a table of field names and values first: a few sentences on what the
-staleness and fragility facts actually mean for this rule, ending with
-"review this," followed by the full field/value/atom/structural-detector
-detail underneath for anyone who wants to verify the narrative against the
-raw data. (For a text-path rule from the quarantined multiformat
-experiment, the AND/OR-correction caveat is one of those sentences, not a
-footnote - it renders in the narrative itself; the core's own `explain`
-output never has one, since it's Sigma-only.) Per-node AST path breadcrumbs
-are not tracked by the
-classifier (`mechanic/fragility.py` records field/value/tier/reason per
-atom, not a path into the tree) - `explain` reports the full reasoning
-trail that actually exists rather than fabricating path detail that
-doesn't. One full example: see RESULTS.md's Part 3 validation section.
-
-**Git-history mining is cached to disk**, keyed to the repo's current
-`git rev-parse HEAD` (`churn.mine_commits_cached`, cache file under
-`<repo>/.mechanic_cache/`) - `triage`/`explain` share the cache with each
-other and across separate invocations, so running several
-`--mechanical-threshold` values (or restarting after an interrupted run)
-doesn't re-pay the full mining cost each time. If the repo has moved
-forward since the cache was written, it's detected and re-mined
-automatically, never silently served stale; pass `--refresh` to force a
-re-mine regardless.
-
-Validation (top-20 SigmaHQ triage output with full explanations, threshold
-sensitivity, bucket counts, unscoreable counts and reasons): see RESULTS.md.
-
-**Priority (CRITICAL/HIGH/MEDIUM/LOW)** is layered on top of the same two
-axes as an explicit, documented lookup table
-(`mechanic/priority.py::PRIORITY_MATRIX`) — never a third, blended number.
-It exists precisely because the two axes above don't fuse (Task 7's own
-finding); the matrix is a transparent function of them, always shown with
-both axis values (`mechanic priority-legend` prints the table itself, no
-repository needed). See `RESULTS.md`'s "Priority as a transparent matrix"
-section for the full rationale and the correction made to the naive "worse
-tier = TTP" framing (it's IOC, matching mechanic's own tier semantics and
-the STP validation's direction).
+### 6. GUI (`mechanic gui`)
 
 ```
-mechanic priority-legend        # the fixed matrix + rationale, no repo needed
-mechanic triage --ordering priority_first <path>
+mechanic gui   # opens http://127.0.0.1:8642/ in your browser
 ```
 
-### 6. GUI (`mechanic gui`, `mechanic/gui/`)
+A local, offline web interface over the exact same engine the CLI uses — no
+repair feature, no network calls, no API key. Shows a repo overview, a
+sortable/filterable table of every rule's priority, and a detail view per
+rule (the same explanation `mechanic explain` prints). Install with
+`pip install "mechanic[gui]"`. Full details: `docs/gui-notes.md`.
 
-```
-mechanic gui                    # opens http://127.0.0.1:8642/ in a browser
-```
+## JSON output
 
-A local, offline web GUI over the exact same engine — no repair, no
-network, no API key. It's a FastAPI backend that calls
-`priority.compute_triage()` (the same function `triage`/`explain` use) and
-serves its JSON to a static vanilla-JS frontend: repo overview cards,
-a sortable/filterable triage table with the priority matrix cell on every
-row, a rule-detail panel (the same `explain` prose), and a priority-matrix
-legend. Needs the optional `gui` extra (`pip install "mechanic[gui]"`).
-Full architecture, the offline guarantee, and how "this never recomputes
-anything" is actually enforced (not just claimed): see
-[`docs/gui-notes.md`](docs/gui-notes.md).
+Every command supports `--json` for scripting. Full field-by-field shapes
+for `scan`, `staleness`, `ast`, `triage`, `explain`, and `priority-legend`
+are documented in the codebase and stay stable across releases — see
+`mechanic/priority.py` and `mechanic/cli.py` for the exact schema, or run
+any command with `--json` against a real repo to see it directly.
 
-## JSON schema (stable — Stage 2/3 consume this)
-
-`scan --json`:
-
-```jsonc
-{
-  "root": "...", "files_scanned": 0, "files_ok": 0, "files_failed": 0,
-  "rules_loaded": 0, "failures_total": 0,
-  "failures_by_category": {"<category>": 0},
-  "rules": [{"file": "...", "type": "standard|correlation", "id": "...", "title": "..."}],
-  "failures": [{
-    "file": "...", "stage": "yaml_parse|rule_construct|validate",
-    "category": "...", "exception_type": "...", "message": "...",
-    "line": null, "fix_hint": "...", "validator": null
-  }],
-  "validate_failures": [ /* same shape as failures, stage == "validate" */ ]
-}
-```
-
-`staleness --json`:
-
-```jsonc
-{
-  "root": "...", "rule_count": 0, "mechanical_threshold": 0.10,
-  "raw_commit_total": 0, "raw_commit_window_days": 365,
-  "excluded_commits": [{"hash": "...", "subject": "...", "rule_files_touched": 0}],
-  "summary": {
-    "rule_count": 0, "rules_with_no_organic_history": 0,
-    "mean_organic_commits_per_rule": 0.0, "median_organic_commits_per_rule": 0.0,
-    "pct_ever_revised": 0.0, "pct_touched_within_6mo": 0.0, "pct_stale_over_2yr": 0.0
-  },
-  "sensitivity": [{"threshold": 0.05, "excluded_commit_count": 0, "excluded_commits": [ /* ... */ ]}],
-  "rules": [{
-    "file": "...", "organic_commit_count": 0, "last_organic_commit_date": null,
-    "days_since": null, "ever_revised": false, "distinct_author_count": 0
-  }],
-  "top_stalest": [ /* same shape as rules, present only when --top passed */ ]
-}
-```
-
-`ast <file>` (one rule; a list if the file has multiple documents):
-
-```jsonc
-{
-  "schema_version": 1, "type": "standard|correlation",
-  "id": "...", "title": "...",
-  "logsource": {"product": null, "category": null, "service": null},
-  "tags": ["attack.execution"], "attack_tags": ["attack.execution"],
-  "conditions": [ /* one root node per condition: string in the rule */ ]
-}
-```
-
-Node shapes under `conditions`:
-
-- `{"node": "AND"|"OR"|"NOT", "negated": bool, "children": [node, ...]}`
-- `{"node": "SELECTOR", "quantifier": "1"|"any"|"all", "pattern": "...", "negated": bool, "children": [selection, ...]}`
-- `{"node": "selection", "name": "...", "kind": "selection"|"filter", "negated": bool, "child": node}`
-- `{"node": "leaf", "kind": "field_value"|"keyword"|"field_null"|"keyword_null", "field": "...", "operators": ["contains", ...], "value": ..., "negated": bool}`
-
-`triage --json`:
-
-```jsonc
-{
-  "root": "...", "fmt": "sigma", "mechanical_threshold": 0.10, "ordering": "tier_first",
-  "rule_count": 0, "scoreable_count": 0, "unscoreable_count": 0,
-  "summary": "N rules, X fragile, Y stale, Z need attention (fragile AND stale)",
-  "bucket_counts": {"likely-repairable": 0, "likely-needs-telemetry-check": 0, "likely-retire": 0},
-  "priority_breakdown": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "UNCERTAIN": 0},  // sums to rule_count
-  "priority_matrix": { /* the full matrix schema - see `priority-legend --json` below, embedded here too so a GUI never needs a second call to render its legend */ },
-  "disclosure": "...",  // the no-combined-score disclosure, always present, never omit when displaying this data
-  "rules": [ /* scoreable rules, sorted per `ordering` - shape below */ ],
-  "unscoreable": [ /* same shape, tier/fragility fields null/empty, unscoreable_reason set */ ]
-}
-```
-
-`ordering` accepts `tier_first` (default), `staleness_first`, or `priority_first` - all three are unweighted
-lookups/sorts, never a fused score (see `mechanic/priority.py`'s module docstring for why).
-
-Each entry in `rules`/`unscoreable` (also the shape `explain --json` returns for one rule):
-
-```jsonc
-{
-  "file": "...",
-  "narrative": "...",       // full prose - what `explain` prints first
-  "short_reason": "...",    // one line - the specific driving observable, what `triage`'s table shows
-  "staleness": {
-    "behavioral_commit_count": 0, "never_revised": false,
-    "days_since_behavioral_change": 0, "age_days": 0,
-    "classification_confidence": "high|medium|low|null",
-    "is_stale": false        // same 730-day (2yr) threshold as staleness's own pct_stale_over_2yr
-  },
-  "fragility": {
-    "tier": "IOC|Artifact|Tool|TTP|null", "confidence": "high|medium|low",
-    "and_or_corrected": true, "unscoreable": false, "unscoreable_reason": null,
-    "structural_findings": [], "structural_detail": {}, "atoms": [{"field": "...", "value": "...", "tier": "...", "reason": "..."}],
-    "caveat": null  // ALWAYS null from the core (Sigma-only, AST path); non-null only from the quarantined multiformat experiment - always check this before trusting a tier at face value
-  },
-  "is_fragile": false,       // tier in {IOC, Artifact, Tool}
-  "needs_attention": false,  // is_fragile AND staleness.is_stale
-  "priority": {
-    "label": "CRITICAL|HIGH|MEDIUM|LOW|null",  // null exactly when uncertain=true - never a guessed label
-    "tier": "IOC|Artifact|Tool|TTP|null",       // axis 1 - ALWAYS present alongside label, never a bare label
-    "staleness_band": "stale_over_2yr|aging_6mo_to_2yr|fresh_under_6mo|null",  // axis 2
-    "lower_confidence": false,   // always false from the core (Sigma-only); same signal as fragility.caveat
-    "uncertain": false,          // true if label is null (unscoreable rule, or unresolvable staleness band)
-    "uncertainty_reason": null   // stated reason whenever uncertain=true
-  },
-  "triage_hypotheses": []    // UNTESTED Stage 3 labels - never a verdict, see disclosure
-}
-```
-
-**The `fragility.caveat` field is the machine-readable form of the text-path confidence warning** - any consumer building automation on top of `--json` output must check it before treating a `tier` as high-confidence; it is non-null precisely (and only) when the tier came from a text-only path rather than a Sigma AST walk. The core's own `--json` output never sets it (fragility/tiering/priority are Sigma-only there - see `docs/core-vs-experiment.md`); it exists in the shape at all because the quarantined `mechanic.experimental.multiformat` package reuses this exact same `RuleSignals`/`FragilitySignal` rendering for its own, lower-confidence Elastic/Splunk tiers (see `docs/multiformat-experimental.md`).
-
-**Priority is a lookup, never a fused score** - `priority.label` is always paired with `priority.tier` and `priority.staleness_band`, the exact two axes that produced it (`mechanic/priority.py::PRIORITY_MATRIX`); no consumer should display `label` without them. `mechanic priority-legend --json` returns the matrix itself (also embedded as `priority_matrix` in every `triage --json` response):
-
-```jsonc
-{
-  "tiers_worst_to_best": ["IOC", "Artifact", "Tool", "TTP"],
-  "staleness_bands_stale_to_fresh": ["stale_over_2yr", "aging_6mo_to_2yr", "fresh_under_6mo"],
-  "labels_worst_to_best": ["CRITICAL", "HIGH", "MEDIUM", "LOW"],
-  "cells": [{"tier": "IOC", "staleness_band": "stale_over_2yr", "label": "CRITICAL"}, /* ... 12 total */],
-  "rationale": "..."
-}
-```
-
-`report --json` is `{"scan": <scan output + validate_failures>, "staleness": <staleness output or null>, "staleness_error": "..." or null}`.
+A couple of fields are worth knowing about specifically if you're
+scripting against the output:
+- **`fragility.caveat`** is non-null only when a tier came from the
+  lower-confidence Elastic/Splunk text path, never from the core Sigma
+  path — check it before trusting a tier at face value.
+- **`priority.label`** always comes with `priority.tier` and
+  `priority.staleness_band` — the two raw inputs that produced it. Never
+  display the label alone.
 
 ## Prior art
 
-**Summiting the Pyramid (STP)** — MITRE Center for Threat-Informed Defense's
-published, versioned (currently v4.0) methodology for scoring detection-
-analytic robustness against adversary evasion
-(https://ctid.mitre.org/projects/summiting-the-pyramid/,
-https://center-for-threat-informed-defense.github.io/summiting-the-pyramid/).
-This is prior art for mechanic's fragility taxonomy itself, not a peer
-comparison — mechanic's IOC/Artifact/Tool/TTP tiers were arrived at
-independently but measure the same construct STP formalized first, with
-industry partners. SigmaHQ has formally adopted STP: the `stp` tag is
-defined in the official Sigma specification
-(`sigma-appendix-tags.md`). See `RESULTS.md`'s STP validation section and
-`data/STP_MAPPING.md` for the full comparison, including a discovered,
-unresolved divergence in how mechanic combines multiple observables within
-one rule versus STP's own documented AND/OR combination rule.
+**Summiting the Pyramid (STP)** — MITRE Center for Threat-Informed
+Defense's published methodology (currently v4.0) for scoring how hard a
+detection rule is to evade
+(https://ctid.mitre.org/projects/summiting-the-pyramid/). mechanic's
+IOC/Artifact/Tool/TTP tiers were built independently but measure the same
+thing STP formalized first — see `RESULTS.md` and `data/STP_MAPPING.md`
+for the full comparison, including a known, unresolved difference in how
+mechanic combines multiple conditions in one rule versus STP's own rule.
+SigmaHQ has formally adopted STP: it's a defined tag in the official Sigma
+spec.
 
-Other related work in this space, from Stage 2's earlier prior-art review:
-sigmalint, EvoSIEM, Uetz et al., GRIDAI, RuleGenie, and ARMS (cited in
-context above, in Component 3) — each addresses a different piece of the
-detection-engineering-quality problem (linting, evasion generation/testing,
-automated repair, rule generation, mutation testing) rather than STP's and
-mechanic's shared target of scoring robustness itself.
+Related prior work, addressing different pieces of the same
+detection-quality problem (linting, evasion testing, automated repair,
+rule generation, mutation testing): sigmalint, EvoSIEM, Uetz et al.,
+GRIDAI, RuleGenie, and ARMS.
 
-## Stage 3 (built, but NOT part of the core - see status note at the top)
+## Stage 3 (historical — removed from the codebase)
 
-At the time this section was originally written, Stage 3's verification
-harness was still deferred, pending a choice of matching engine (zircolite
-was the leading candidate). It has since been built - `docs/stage3-harness-
-evaluation.md` documents the actual investigation and decision, which
-landed on **RSigma** instead, not zircolite. The harness, gate, evasion
-transformer, and LLM repair generator all exist now
-(`mechanic/verify.py`, `mechanic/gate.py`, `mechanic/evasion.py`,
-`mechanic/repair_generator.py`, run via the separate `mechanic-repair` CLI)
-and are complete, with an honest, disclosed result (RESULTS.md's Stage 3
-Phase 3 section). None of it is part of the core described above, by
-design - see `docs/core-vs-experiment.md` for the boundary and how it's
-enforced.
+An earlier, separate experiment tried automated rule repair (a
+verification harness, an evasion generator, an LLM repair generator). It
+ran to completion with an honestly-measured result (3.6% acceptance rate)
+recorded in `RESULTS.md` for the historical record, but the code has since
+been removed from this repository — it was never part of the core tool.
 
 ## Explicitly out of scope for this stage
 
-No fragility scoring, no ATT&CK technique-proximity analysis, no evasion
-generation, no repair, and no heuristic anywhere that judges whether a rule
-is *good*. The AST captures structure and polarity, nothing else.
+No ATT&CK technique-coverage analysis, no evasion generation, no automated
+repair, and nothing that judges whether a rule is "good" in any broader
+sense than the two specific checks above.
 
 ## Running
 
@@ -564,4 +297,4 @@ mechanic staleness /path/to/repo --subdir rules
 pytest tests/
 ```
 
-See `RESULTS.md` for the five-repo validation run.
+See `RESULTS.md` for the full five-repo validation run.
