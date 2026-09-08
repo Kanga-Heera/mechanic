@@ -1,32 +1,9 @@
-/* mechanic GUI — a fight-card security console.
-   Black/monochrome arena base, silver/white combat-HUD chrome, angular
-   cut-corner panels, glowing edges. Was fire-orange/gold in an earlier
-   pass; the accent family (and every literal glow colour tied to it) was
-   re-themed to black/white here - structure, layout, and every other
-   colour untouched. The STATUS ramp itself (--critical/--high/--medium
-   /--low below) is UNCHANGED from the validated palette - the dataviz
-   skill's validate_palette.js run (categorical/CVD-separation mode, see
-   git history) still applies verbatim: worst adjacent pair clears the CVD
-   floor (deutan ΔE 11.3, tritan ΔE 9.6) and lands at 13.6/15 on the strict
-   normal-vision no-label floor, accepted because every instance is a
-   labelled badge, never a bare swatch (verified again directly against
-   this file: priorityBadge()/buildChips() in app.js always render the
-   text label alongside the colour, no bare-swatch instance exists).
-
-   RE-CHECKED (mechanic hardening pass, Task 7): before accepting 13.6
-   again, an actual search was run rather than assumed unfixable - 332,173
-   candidate (--high, --medium) pairs across the orange/amber and yellow/
-   gold hue families, filtered to the dark-mode OKLCH lightness band
-   [0.48, 0.67] and the 0.10 chroma floor, scored by worst-pair normal-
-   vision ΔE. Best found: 13.9 (barely above 13.6), and it only reaches
-   that by giving up CVD separation (11.3 → the 6-8 "floor" band). The
-   current colours are already close to the practical ceiling for four
-   traffic-light-convention hues sharing this narrow lightness band on a
-   near-black surface - kept as a verified, evidence-backed decision, not
-   a re-accepted unexamined gap. No gradients used to fake depth without
-   meaning - the ones here (buttons, the progress/energy bar, panel
-   edge-light) all read as directional state (pressed/hover, fill
-   progress, "lit" edge), same rule as before. */
+/* mechanic GUI — dark, flat, quiet chrome. Colour tokens and fonts are
+   fixed points (do not change without re-running the dataviz skill's
+   validate_palette.js against --critical/--high/--medium/--low: worst
+   adjacent pair clears the CVD floor at deutan ΔE 11.3 / tritan ΔE 9.6,
+   13.6 on the strict normal-vision no-label floor - acceptable only
+   because every instance is a labelled badge, never a bare swatch). */
 
 :root {
   --bg-base: #0a0a0a;
@@ -61,10 +38,9 @@
   --font-ui: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
-  --radius: 2px;
-  --corner: 10px;
-  --corner-lg: 16px;
-  --glow-accent: 0 0 0 1px rgba(255, 255, 255, 0.28), 0 0 18px rgba(255, 255, 255, 0.18);
+  --radius: 8px;
+  --radius-sm: 5px;
+  --focus-ring: 0 0 0 3px rgba(255, 255, 255, 0.14);
   --sidebar-width: 300px;
   --space-1: 4px;
   --space-2: 8px;
@@ -86,14 +62,6 @@ html, body {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   height: 100%;
-}
-
-body {
-  background-image:
-    radial-gradient(1100px 550px at 12% -8%, rgba(255, 255, 255, 0.07), transparent 60%),
-    radial-gradient(900px 500px at 105% 115%, rgba(255, 255, 255, 0.05), transparent 60%);
-  background-color: var(--bg-base);
-  background-attachment: fixed;
 }
 
 code, .mono { font-family: var(--font-mono); font-size: 0.93em; }
@@ -138,8 +106,7 @@ a:hover { text-decoration: underline; }
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-4) var(--space-4) var(--space-3) var(--space-4);
-  border-bottom: 2px solid var(--accent-deep);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent);
+  border-bottom: 1px solid var(--border-soft);
 }
 .brand {
   font-weight: 900;
@@ -147,7 +114,6 @@ a:hover { text-decoration: underline; }
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-primary);
-  text-shadow: 0 0 14px rgba(255, 255, 255, 0.35);
 }
 
 .badge {
@@ -155,8 +121,8 @@ a:hover { text-decoration: underline; }
   font-weight: 800;
   letter-spacing: 0.08em;
   padding: 3px 8px;
+  border-radius: var(--radius-sm);
   text-transform: uppercase;
-  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
 }
 .badge-core { background: rgba(255, 255, 255, 0.10); color: var(--accent-bright); border: 1px solid var(--accent-deep); }
 
@@ -180,9 +146,7 @@ a:hover { text-decoration: underline; }
 .panel {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-top: 2px solid var(--accent-deep);
   border-radius: var(--radius);
-  clip-path: polygon(var(--corner-lg) 0, 100% 0, 100% calc(100% - var(--corner-lg)), calc(100% - var(--corner-lg)) 100%, 0 100%, 0 var(--corner-lg));
   padding: var(--space-5);
 }
 
@@ -217,7 +181,7 @@ input[type="text"], input[type="number"], select {
 }
 input[type="text"]:focus, input[type="number"]:focus, select:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.14);
+  box-shadow: var(--focus-ring);
 }
 input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; }
 
@@ -231,18 +195,17 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
   padding: 9px 16px;
   border: 1px solid transparent;
   cursor: pointer;
-  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
-  transition: box-shadow 0.15s ease, transform 0.05s ease;
+  transition: box-shadow 0.15s ease, transform 0.05s ease, background 0.15s ease;
 }
 .btn:active { transform: translateY(1px); }
 .btn-block { width: 100%; }
 .btn-primary {
-  background: linear-gradient(135deg, var(--accent-deep), var(--accent));
+  background: var(--accent);
   color: #121212;
 }
-.btn-primary:hover { box-shadow: var(--glow-accent); }
+.btn-primary:hover { background: var(--accent-bright); }
 .btn-ghost { background: var(--bg-panel-raised); border-color: var(--border); color: var(--text-secondary); }
-.btn-ghost:hover { color: var(--accent-bright); border-color: var(--accent); box-shadow: 0 0 12px rgba(255, 255, 255, 0.12); }
+.btn-ghost:hover { color: var(--accent-bright); border-color: var(--accent); }
 
 .progress-area { margin-top: var(--space-3); }
 .progress-detail {
@@ -326,12 +289,11 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
   border: 1px solid var(--border);
   border-top: 2px solid var(--accent-deep);
   border-radius: var(--radius);
-  clip-path: polygon(var(--corner) 0, 100% 0, 100% calc(100% - var(--corner)), calc(100% - var(--corner)) 100%, 0 100%, 0 var(--corner));
   padding: var(--space-4);
 }
 .stat-card .stat-value { font-size: 27px; font-weight: 900; letter-spacing: -0.01em; color: var(--text-primary); font-variant-numeric: tabular-nums; }
 .stat-card .stat-label { font-size: 10.5px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
-.stat-card.accent .stat-value { color: var(--accent-bright); text-shadow: 0 0 16px rgba(255, 255, 255, 0.35); }
+.stat-card.accent .stat-value { color: var(--accent-bright); }
 
 .charts-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-4); }
 .chart-card {
@@ -339,7 +301,6 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
   border: 1px solid var(--border);
   border-top: 2px solid var(--accent-deep);
   border-radius: var(--radius);
-  clip-path: polygon(var(--corner) 0, 100% 0, 100% calc(100% - var(--corner)), calc(100% - var(--corner)) 100%, 0 100%, 0 var(--corner));
   padding: var(--space-4);
 }
 .chart-body { margin-top: var(--space-2); }
@@ -439,7 +400,6 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
   font-weight: 800;
   letter-spacing: 0.05em;
   white-space: nowrap;
-  clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
 }
 .priority-badge .dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
 .priority-badge .axis { font-weight: 500; font-family: var(--font-mono); color: var(--text-muted); margin-left: 2px; }
@@ -495,8 +455,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
   border: 1px solid var(--border);
   border-top: 2px solid var(--accent);
   border-radius: var(--radius);
-  clip-path: polygon(var(--corner-lg) 0, 100% 0, 100% calc(100% - var(--corner-lg)), calc(100% - var(--corner-lg)) 100%, 0 100%, 0 var(--corner-lg));
-  box-shadow: 0 0 60px rgba(0, 0, 0, 0.6), var(--glow-accent);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   padding: var(--space-5);
   position: relative;
 }
@@ -550,7 +509,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px;
   cursor: pointer;
 }
 .tab-btn:hover { color: var(--text-primary); }
-.tab-btn.active { color: var(--accent-bright); border-bottom-color: var(--accent); text-shadow: 0 0 10px rgba(255, 255, 255, 0.35); }
+.tab-btn.active { color: var(--accent-bright); border-bottom-color: var(--accent); }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 

@@ -411,10 +411,8 @@ def _render_explain(sig: priority.RuleSignals) -> None:
     "[cyan]mechanic triage PATH[/cyan] once it loads cleanly - each command's own "
     "[cyan]--help[/cyan] has worked examples. Every command accepts [cyan]--json[/cyan] for "
     "machine-readable output. Full methodology, validated results, and known limitations: "
-    "see [u]RESULTS.md[/u] and [u]README.md[/u] in the project repository. This CLI is the "
-    "CORE product only - it needs no network, no API key, and no RSigma binary; the "
-    "experimental repair-verification harness lives in the separate "
-    "[cyan]mechanic-repair[/cyan] command (see [u]docs/core-vs-experiment.md[/u]).",
+    "see [u]RESULTS.md[/u] and [u]README.md[/u] in the project repository. This CLI needs no "
+    "network and no API key for any command.",
 )
 @click.version_option(prog_name="mechanic", package_name="mechanic")
 def main() -> None:
@@ -434,11 +432,6 @@ def main() -> None:
     see [u]docs/core-vs-experiment.md[/u] for why and
     [u]docs/multiformat-experimental.md[/u] for the quarantined Elastic/Splunk
     text-path work.
-
-    This is the CORE product: it never imports the Stage 3 repair pipeline
-    (no RSigma, no network, no LLM API key required for any command here).
-    The repair-verification harness is a separate, quarantined experiment -
-    see [u]docs/core-vs-experiment.md[/u] and the [cyan]mechanic-repair[/cyan] command.
     """
 
 
@@ -839,13 +832,12 @@ def priority_legend(as_json: bool) -> None:
 def gui(host: str, port: int, no_browser: bool) -> None:
     """Launch the local web GUI - a VIEW over this same core engine.
 
-    Runs fully offline: no network access, no API key, no RSigma. It is a
-    thin FastAPI server that calls straight into `mechanic.priority`/
-    `mechanic.churn` (the exact same functions `triage`/`explain` use) and
-    serves their JSON to a static frontend - it never recomputes or
-    reshapes an analysis result, and it never exposes the Stage 3 repair
-    experiment (see docs/core-vs-experiment.md). Needs the optional `gui`
-    extra: [cyan]pip install "mechanic\[gui]"[/cyan].
+    Runs fully offline: no network access, no API key. It is a thin FastAPI
+    server that calls straight into `mechanic.priority`/`mechanic.churn`
+    (the exact same functions `triage`/`explain` use) and serves their JSON
+    to a static frontend - it never recomputes or reshapes an analysis
+    result (see docs/gui.md). Needs the optional `gui` extra:
+    [cyan]pip install "mechanic\[gui]"[/cyan].
 
     \b
     Examples:

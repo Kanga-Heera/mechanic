@@ -1,7 +1,7 @@
-"""The GUI (`mechanic gui`) is a VIEW over the core engine only - never the
-Stage 3 repair experiment, never a recomputation of any analysis. These
-tests prove both properties directly, plus the offline/no-CDN constraint
-and the actual HTTP surface end to end (load -> poll -> result -> detail).
+"""The GUI (`mechanic gui`) is a VIEW over the core engine only - never a
+recomputation of any analysis. These tests prove that, plus the
+offline/no-CDN constraint and the actual HTTP surface end to end
+(load -> poll -> result -> detail).
 """
 
 from __future__ import annotations
@@ -25,18 +25,13 @@ from mechanic.gui.server import STATIC_DIR, Job, _run_job, create_app  # noqa: E
 GUI_DIR = Path(__file__).parent.parent / "mechanic" / "gui"
 
 EXPERIMENT_MODULE_LEAVES = [
-    "verify",
-    "gate",
-    "evasion",
-    "synthetic_benign",
-    "llm_client",
-    "repair_generator",
-    "repair_outcome",
-    "cli_repair",
+    "text_fragility",
+    "splunk_macros",
+    "multiformat_fragility",
 ]
 
 
-# --- Part 0: the GUI never touches the repair experiment -------------------
+# --- Part 0: the GUI never touches the quarantined experiment --------------
 
 
 def test_gui_source_imports_nothing_from_experiment():
@@ -51,16 +46,6 @@ def test_gui_source_imports_nothing_from_experiment():
         for ln in import_lines:
             for leaf in EXPERIMENT_MODULE_LEAVES:
                 assert leaf not in ln, f"{path.name} imports experiment module via: {ln!r}"
-
-
-def test_gui_has_no_repair_endpoints(tmp_path: Path):
-    """The API surface itself must never expose repair/verify/gate - not
-    just "no import," but no route path suggesting it either."""
-    app = create_app(db_path=tmp_path / "gui_jobs.sqlite3")
-    paths = [route.path for route in app.routes]
-    for p in paths:
-        for leaf in ["verify", "gate", "evasion", "repair", "llm"]:
-            assert leaf not in p.lower(), f"GUI route unexpectedly references '{leaf}': {p}"
 
 
 def test_core_isolation_test_still_passes():

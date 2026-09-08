@@ -525,7 +525,7 @@ function buildRow(r) {
 }
 
 function renderUnscoreable(list) {
-  document.getElementById("unscoreable-summary").textContent = `Unscoreable rules (${list.length}) — no tier assigned, never defaulted`;
+  document.getElementById("unscoreable-summary").textContent = `Unscoreable rules (${list.length})`;
   const tbody = document.getElementById("unscoreable-tbody");
   tbody.innerHTML = "";
   list.forEach((r) => {
@@ -597,10 +597,11 @@ function renderDetailOverview(r) {
   }
 
   if (r.triage_hypotheses && r.triage_hypotheses.length) {
-    content.appendChild(el("h3", null, ["Triage hypotheses (untested)"]));
+    content.appendChild(el("h3", null, ["Triage hypotheses"]));
     const tags = el("div", { class: "hyp-tags" });
     r.triage_hypotheses.forEach((h) => tags.appendChild(el("span", { class: "hyp-tag" }, [h])));
     content.appendChild(tags);
+    content.appendChild(el("p", { class: "muted", style: "margin-top:6px" }, ["Not yet verified — starting points for manual review."]));
   }
 }
 

@@ -95,18 +95,16 @@ static files for `http://`/`https://`/CDN-hostname substrings and fails if
 any appear. The server itself imports no HTTP client library (`requests`,
 `urllib.request`) - it has no code path that could make an outbound call.
 
-## Repair stays quarantined and unexposed
+## The quarantined multiformat experiment stays unexposed
 
 `mechanic/gui/server.py` imports only `mechanic.churn` and
 `mechanic.priority` - core modules. `tests/test_gui.py::
 test_gui_source_imports_nothing_from_experiment` source-scans every file
 under `mechanic/gui/` for the same experiment-module leaf names
-`tests/test_core_isolation.py` checks against core; `test_gui_has_no_
-repair_endpoints` checks the actual FastAPI route table for the same. The
-existing `tests/test_core_isolation.py` (Part 0 of the hardening pass) is
-re-run as its own subprocess from inside `test_gui.py` too, so adding the
-GUI can never silently break that boundary without a test noticing in the
-same file that added the GUI.
+`tests/test_core_isolation.py` checks against core. The existing
+`tests/test_core_isolation.py` is re-run as its own subprocess from inside
+`test_gui.py` too, so adding the GUI can never silently break that boundary
+without a test noticing in the same file that added the GUI.
 
 ## Design
 
@@ -149,8 +147,6 @@ past.
 
 ## What this GUI deliberately does not do
 
-- No repair generation, no verification harness, no `mechanic-repair`
-  anything - see `docs/core-vs-experiment.md`.
 - No editing of rules, no writing to the loaded repository - read-only,
   same as the CLI.
 - No authentication, no multi-user support, no persistence across a

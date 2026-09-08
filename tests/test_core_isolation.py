@@ -1,13 +1,10 @@
 """Hardening Part 0: the CORE (mechanic.cli and everything it imports) must
-have zero dependency on the EXPERIMENT (Stage 3 repair-verification
-pipeline) - see docs/core-vs-experiment.md.
+have zero dependency on the EXPERIMENT (the quarantined Elastic/Splunk
+multiformat fragility path) - see docs/core-vs-experiment.md.
 
-Every test here runs in a FRESH subprocess, deliberately - the pytest
-process running this whole suite has already imported test_llm_client.py,
-test_verify.py, etc. by the time this file's tests run, so checking
-`sys.modules` in-process would be meaningless (everything would already be
-"imported"). A subprocess with a clean `sys.modules` is the only way to
-actually prove `import mechanic.cli` alone doesn't pull in the experiment.
+Every test here runs in a FRESH subprocess, deliberately - a subprocess with
+a clean `sys.modules` is the only way to actually prove `import mechanic.cli`
+alone doesn't pull in the experiment.
 """
 
 from __future__ import annotations
@@ -21,16 +18,8 @@ from pathlib import Path
 import pytest
 
 EXPERIMENT_MODULES = [
-    "mechanic.verify",
-    "mechanic.gate",
-    "mechanic.evasion",
-    "mechanic.synthetic_benign",
-    "mechanic.llm_client",
-    "mechanic.repair_generator",
-    "mechanic.repair_outcome",
-    "mechanic.cli_repair",
     # Elastic/Splunk multiformat fragility - quarantined per
-    # docs/multiformat-experimental.md, same as the repair pipeline above.
+    # docs/multiformat-experimental.md.
     "mechanic.experimental.multiformat.text_fragility",
     "mechanic.experimental.multiformat.splunk_macros",
     "mechanic.experimental.multiformat.multiformat_fragility",
@@ -55,16 +44,9 @@ CORE_MODULES = [
 
 
 def _stripped_env() -> dict:
-    """Environment with every experiment-only signal removed: no API key,
-    no pinned RSigma binary override. `requests` may or may not be
-    installed in this dev venv (it's still a transitive dep of other
-    tooling) - the point of these tests is the import graph and the
-    command's own behavior never *reaching* for any of it, not that the
-    package is physically absent."""
-    env = dict(os.environ)
-    env.pop("GROQ_API_KEY", None)
-    env.pop("MECHANIC_RSIGMA_BIN", None)
-    return env
+    """A plain environment, used for every subprocess this file spawns so
+    results don't depend on whatever happens to be set in the dev shell."""
+    return dict(os.environ)
 
 
 def _run_py(code: str, env: dict | None = None, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -78,9 +60,9 @@ def _run_py(code: str, env: dict | None = None, cwd: Path | None = None) -> subp
 
 
 def test_importing_core_cli_does_not_import_experiment_modules():
-    """Importing mechanic.cli alone must not pull in verify/gate/evasion/
-    llm_client/repair_generator/repair_outcome/synthetic_benign/cli_repair -
-    the reactor cannot depend on the thing bolted to its side."""
+    """Importing mechanic.cli alone must not pull in the quarantined
+    multiformat experiment - the reactor cannot depend on the thing bolted
+    to its side."""
     proc = _run_py(
         """
         import sys
@@ -166,10 +148,9 @@ def core_only_repo(tmp_path: Path) -> Path:
     ],
 )
 def test_core_commands_run_with_no_network_no_key_no_rsigma(core_only_repo: Path, argv: list[str]):
-    """Every core command must complete against a real repo with GROQ_API_KEY
-    unset, MECHANIC_RSIGMA_BIN unset, and requests/rsigma never touched -
-    the behavioral proof that "zero dependency on the experiment" is true,
-    not just true of the import graph."""
+    """Every core command must complete cleanly against a real repo - the
+    behavioral proof that "zero dependency on the experiment" is true, not
+    just true of the import graph."""
     args = [a.format(repo=str(core_only_repo)) for a in argv]
     proc = subprocess.run(
         [sys.executable, "-m", "mechanic.cli", *args, "--json"],
@@ -178,8 +159,6 @@ def test_core_commands_run_with_no_network_no_key_no_rsigma(core_only_repo: Path
         env=_stripped_env(),
     )
     assert proc.returncode in (0, 1), f"unexpected crash: {proc.stderr}"
-    assert "GROQ_API_KEY" not in proc.stderr
-    assert "rsigma" not in proc.stderr.lower()
     assert "Traceback" not in proc.stderr, proc.stderr
 
 
@@ -193,11 +172,3 @@ def test_core_explain_runs_with_no_network_no_key_no_rsigma(core_only_repo: Path
     )
     assert proc.returncode == 0, proc.stderr
     assert "Traceback" not in proc.stderr, proc.stderr
-
-
-def test_mechanic_repair_cli_is_the_only_verify_importer():
-    """mechanic-repair (mechanic/cli_repair.py) is allowed - indeed
-    expected - to import mechanic.verify. This test exists so that fact is
-    asserted explicitly rather than only proven by omission elsewhere."""
-    src = Path(__file__).parent.parent.joinpath("mechanic", "cli_repair.py").read_text(encoding="utf-8")
-    assert "from mechanic import verify" in src or "import mechanic.verify" in src

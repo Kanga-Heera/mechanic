@@ -28,23 +28,14 @@ dev = [
     # dependency is the separate `gui` extra below; this is test tooling.
     "httpx>=0.27",
 ]
-# Stage 3 EXPERIMENT only (repair-verification harness + LLM repair
-# generator) - see docs/core-vs-experiment.md. The core product
-# (scan/staleness/triage/explain) does not need requests and has no network
-# dependency at all; only mechanic-repair (mechanic/cli_repair.py) and the
-# mechanic.llm_client/verify/gate/evasion/repair_generator/repair_outcome/
-# synthetic_benign modules use this.
-repair = ["requests>=2.31"]
-# Local GUI (`mechanic gui`) - a VIEW over the core engine only, never the
-# repair experiment. Runs fully offline (no CDN assets, no network calls
-# from the served page). `mechanic/cli.py` imports mechanic.gui lazily
-# (inside the `gui` command body), so these are never required just to run
-# scan/staleness/triage/explain.
+# Local GUI (`mechanic gui`) - a VIEW over the core engine only. Runs fully
+# offline (no CDN assets, no network calls from the served page).
+# `mechanic/cli.py` imports mechanic.gui lazily (inside the `gui` command
+# body), so these are never required just to run scan/staleness/triage/explain.
 gui = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 mechanic = "mechanic.cli:main"
-mechanic-repair = "mechanic.cli_repair:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

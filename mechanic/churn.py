@@ -433,6 +433,84 @@ def _git_diff_via_subprocess(root: Path, args: list[str]) -> list[_FallbackModif
     return files
 
 
+_BATCH_DIFF_TIMEOUT_SECONDS = 1800
+
+
+def _git_log_diff_batch(root: Path, timeout: float = _BATCH_DIFF_TIMEOUT_SECONDS) -> dict[str, list[_FallbackModifiedFile]]:
+    """The full-history equivalent of calling `_git_diff_via_subprocess` once
+    per commit, but as ONE subprocess call instead of one per commit.
+
+    MOTIVATION (profiled, not assumed): mining a real SigmaHQ subdirectory's
+    history spent 2,334 of 2,489 total seconds in `_git_diff_via_subprocess`
+    alone - 25,742 individual `git diff-tree` process spawns, each paying
+    OS process-creation overhead (expensive on Windows specifically). That
+    per-commit design was adopted deliberately, to fix a real GitPython
+    deadlock (see `_modified_files_no_patch`'s docstring) - but nothing
+    about the deadlock fix actually requires a SEPARATE process per commit,
+    only that the diff never go through GitPython's threaded stdout/stderr
+    pump. A single `git log --name-status` call is exactly as immune to
+    that deadlock class (still a plain `subprocess.run(..., timeout=...)`,
+    never touching `Diffable.diff()`) while paying the process-spawn cost
+    exactly once for the whole history instead of once per commit.
+
+    Confirmed equivalent to the per-commit path for the two cases
+    `_modified_files_no_patch` special-cases by hand, empirically, against
+    this project's own repo history (not assumed from git docs alone):
+      - the root commit's diff is included in full (every file as an ADD
+        against the empty tree) with no `--root` flag needed - `git log`
+        does this automatically, unlike single-commit `git diff-tree`.
+      - a merge commit gets NO file-status lines at all under git's own
+        default merge-diff suppression - the same `[]`
+        `_modified_files_no_patch` already returns for a merge commit by
+        construction, so a merge commit's hash simply has no entry in the
+        returned dict, and `.get(hash, [])` at each call site is unaffected.
+    Same rename/copy detection (`-M`) as the per-commit path.
+
+    `\\x01` (paired with the commit hash via `--format=%x01%H`) marks the
+    start of each commit's block - chosen because it cannot appear in a
+    commit subject/body as ordinary text, so splitting on it is unambiguous
+    without needing to parse arbitrary commit-message content.
+    """
+    result = subprocess.run(
+        ["git", "log", "--name-status", "-r", "-M", "--format=%x01%H"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        encoding="utf-8",
+        errors="replace",
+    )
+    by_hash: dict[str, list[_FallbackModifiedFile]] = {}
+    for block in result.stdout.split("\x01"):
+        if not block:
+            continue
+        lines = block.splitlines()
+        if not lines:
+            continue
+        commit_hash = lines[0]
+        files: list[_FallbackModifiedFile] = []
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            status = parts[0]
+            if status.startswith("R") or status.startswith("C"):
+                old_path, new_path = parts[1], parts[2]
+                change_type = "RENAME" if status.startswith("R") else "COPY"
+            elif status == "A":
+                old_path, new_path = None, parts[1]
+                change_type = "ADD"
+            elif status == "D":
+                old_path, new_path = parts[1], None
+                change_type = "DELETE"
+            else:  # M, T (type change), etc. - treated as a plain modify
+                old_path, new_path = parts[1], parts[1]
+                change_type = "MODIFY"
+            files.append(_FallbackModifiedFile(old_path, new_path, change_type))
+        by_hash[commit_hash] = files
+    return by_hash
+
+
 def _modified_files_no_patch(commit: Commit, root: Path) -> list[_FallbackModifiedFile]:
     """Equivalent to `commit.modified_files`, but without asking GitPython to
     build unified-diff patch text (`create_patch=True`) for every file, and
@@ -511,13 +589,23 @@ def _mine_commits(
     exclude_dirs = fmt.exclude_dirs
     facts: list[_CommitFacts] = []
     repo_kwargs = {"single": single} if single else {}
+    # Full-history traversal (the common, expensive case): fetch every
+    # commit's file-change facts in ONE subprocess call instead of one per
+    # commit (see `_git_log_diff_batch`'s docstring for why - this is the
+    # dominant real-world cost of mining a large repo, confirmed by
+    # profiling). `single` mode (used only by the regression-lock test to
+    # re-check one already-known historical commit) stays on the per-commit
+    # path - it's already a single subprocess call in that case, and a full
+    # `git log` batch would be pure overhead for looking up just one commit.
+    diff_batch = None if single else _git_log_diff_batch(root)
     for i, commit in enumerate(Repository(str(root), **repo_kwargs).traverse_commits(), start=1):
         if progress_cb is not None and i % 250 == 0:
             progress_cb(i)
         touched: list[str] = []
         renames: list[tuple[str, str]] = []
         file_changes: list[FileChangeFact] = []
-        for mf in _modified_files_no_patch(commit, root):
+        modified_files = diff_batch.get(commit.hash, []) if diff_batch is not None else _modified_files_no_patch(commit, root)
+        for mf in modified_files:
             # GOTCHA (confirmed empirically against real repo history, not
             # assumed): GitPython's underlying Diff object populates BOTH
             # a_path and b_path with the SAME path for a plain ADD or DELETE,
